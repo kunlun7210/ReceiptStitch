@@ -1,0 +1,35 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const { chromium, webkit } = require('playwright');
+const variant = process.env.BROWSER || 'chrome';
+let server, browser;
+(async () => {
+  const prefix = process.env.TEST_PREFIX || '/';
+  server = require('../scripts/serve.cjs')({basePath:prefix}); const originRequests=[];
+  server.on('request', req=>originRequests.push(req.url));
+  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+  const base=`http://127.0.0.1:${server.address().port}${prefix}`;
+  browser=await (variant==='webkit'?webkit:chromium).launch({...(variant==='webkit'?{}:{channel:'chrome'}),headless:true});
+  const context=await browser.newContext({viewport:{width:393,height:852}}), page=await context.newPage(), errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  await page.goto(base);await page.evaluate(()=>navigator.serviceWorker.ready);
+  const sampleDir=process.env.SAMPLE_DIR||path.resolve(__dirname, '../../fixtures');
+  const files=['9.PNG','10.PNG'].map(name=>path.join(sampleDir,name));
+  const run=async()=>{
+    await page.locator('#fileInput').setInputFiles(files);
+    await page.waitForFunction(async()=>{const{state}=await import('./app.js');return state.items.length===2&&!state.busy},null,{timeout:180000});
+    await page.evaluate(async()=>{const{state}=await import('./app.js');await state.pending;await state.pendingRender});
+    return page.evaluate(async()=>{const{state}=await import('./app.js');return{status:state.items.map(i=>i.status),masks:state.items[1].masks.map(m=>m.kind),results:state.results.map(r=>({width:r.width,height:r.height,bytes:r.blob?.size,error:r.error}))}});
+  };
+  const cold=await run();assert.deepEqual(cold.status,['ready','ready']);assert.deepEqual(cold.masks,['card','balance']);assert.ok(cold.results[0].bytes>100000);
+  assert.ok(originRequests.some(p=>p.endsWith('.wasm.part1')));assert.ok(originRequests.some(p=>p.endsWith('.wasm.part2')));
+  assert.ok(!originRequests.some(p=>p.endsWith('ort-wasm-simd-threaded.jsep.wasm')));
+  const cache=await page.evaluate(async()=>{const c=await caches.open('receipt-stitch-ocr-v1');const r=await c.match(new URL('ocr/runtime-v1/ort/ort-wasm-simd-threaded.jsep.wasm',location.href));return{bytes:(await r.arrayBuffer()).byteLength,type:r.headers.get('Content-Type')}});
+  assert.equal(cache.bytes,26239907);assert.equal(cache.type,'application/wasm');
+  console.log('PASS',variant,'two parts downloaded, verified, cached and real inference succeeded');
+  if(variant==='webkit'){await new Promise(resolve=>server.close(resolve));await assert.rejects(fetch(base));}else await context.setOffline(true);
+  await page.reload();const offline=await run();assert.deepEqual(offline.status,['ready','ready']);assert.deepEqual(offline.masks,['card','balance']);assert.ok(offline.results[0].bytes>100000);assert.deepEqual(errors,[]);
+  console.log('PASS',variant,'reload and real inference from cached merged WASM succeeded');
+  await fs.writeFile(path.resolve(__dirname,`../../qa/components-${variant}.json`),JSON.stringify({variant,cold,offline,cache,errors,offlineMode:variant==='webkit'?'origin-server-stopped':'browser-offline'},null,2));
+})().catch(error=>{console.error(error);process.exitCode=1}).finally(async()=>{await browser?.close();server?.close()});
