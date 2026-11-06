@@ -1,4 +1,4 @@
-const SHELL = 'receipt-stitch-shell-v8';
+const SHELL = 'receipt-stitch-shell-v9';
 const OCR = 'receipt-stitch-ocr-v1';
 const FILES = ['./','./index.html','./styles.css','./app.js','./processing.js','./ocr.js','./manifest.webmanifest','./icon.svg','./icon-192.png','./icon-512.png','./apple-touch-icon.png'];
 self.addEventListener('install', event => { event.waitUntil(caches.open(SHELL).then(cache => cache.addAll(FILES)).then(() => self.skipWaiting())); });
