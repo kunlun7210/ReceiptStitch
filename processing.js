@@ -191,6 +191,10 @@ export function paintWatermark(context, width, height, settings) {
 }
 
 export function outputGeometry(left, right, direction = 'horizontal') {
+  if (!right) {
+    const ratio = Math.min(1, Math.sqrt(12_000_000 / (left.naturalWidth * left.naturalHeight)), 8192 / left.naturalWidth, 8192 / left.naturalHeight);
+    return { width: Math.max(1, Math.floor(left.naturalWidth * ratio)), height: Math.max(1, Math.floor(left.naturalHeight * ratio)), resized: ratio < 1 };
+  }
   if (direction === 'vertical') {
     const width = Math.max(left.naturalWidth, right.naturalWidth);
     const firstHeight = Math.round(left.naturalHeight * width / left.naturalWidth);
@@ -210,19 +214,19 @@ export function outputGeometry(left, right, direction = 'horizontal') {
 
 export async function composePair(left, right, settings, direction = 'horizontal') {
   const vertical = direction === 'vertical';
-  const geometry = outputGeometry(left.image, right.image, direction);
+  const geometry = outputGeometry(left.image, right?.image, direction);
   const canvas = document.createElement('canvas');
   canvas.width = geometry.width; canvas.height = geometry.height;
   const context = canvas.getContext('2d', { alpha: false });
   context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
   let offset = 0;
-  const images = vertical
+  const images = !right ? [[left, geometry.width, geometry.height]] : vertical
     ? [[left, geometry.width, geometry.firstHeight], [right, geometry.width, geometry.secondHeight]]
     : [[left, geometry.leftWidth, geometry.height], [right, geometry.rightWidth, geometry.height]];
   for (const [item, width, height] of images) {
     context.save(); context.translate(vertical ? 0 : offset, vertical ? offset : 0);
     context.drawImage(item.image, 0, 0, width, height);
-    paintMasks(context, item.masks, vertical ? width / item.image.naturalWidth : height / item.image.naturalHeight);
+    paintMasks(context, item.masks, !right || vertical ? width / item.image.naturalWidth : height / item.image.naturalHeight);
     context.restore(); offset += vertical ? height : width;
   }
   paintWatermark(context, canvas.width, canvas.height, settings);
