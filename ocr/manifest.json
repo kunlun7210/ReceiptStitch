@@ -1,30 +1,55 @@
 {
-  "version": 1,
+  "version": 2,
   "files": [
     {
       "file": "ocr/runtime-v1/assets/ort.min-DwuZQYb1.js",
       "bytes": 350692,
-      "sha256": "5595b039f9d6719df9584c6e18c31bfae861368c0050cdbb5224fb69ecaf2d00"
+      "sha256": "5595b039f9d6719df9584c6e18c31bfae861368c0050cdbb5224fb69ecaf2d00",
+      "transport": {
+        "file": "ocr/transport-v1/5595b039f9d6719df9584c6e18c31bfae861368c0050cdbb5224fb69ecaf2d00.gz",
+        "bytes": 91332,
+        "sha256": "7c803622bebd40a9e657eba692bd3c01c599fa384bc6e50cf920675fc1370e3d"
+      }
     },
     {
       "file": "ocr/runtime-v1/assets/preload-helper-CWYXBt0P.js",
       "bytes": 2204,
-      "sha256": "4c979b7784f726964c1420849976b4642f38d0b337617768942ec02379038109"
+      "sha256": "4c979b7784f726964c1420849976b4642f38d0b337617768942ec02379038109",
+      "transport": {
+        "file": "ocr/transport-v1/4c979b7784f726964c1420849976b4642f38d0b337617768942ec02379038109.gz",
+        "bytes": 1159,
+        "sha256": "f463efee23a33cb32eb7faee4d6c9114047b36c8c3496acfd94c964402278c3f"
+      }
     },
     {
       "file": "ocr/runtime-v1/assets/worker-entry-C9UNuyOJ-EhIzhVdm.js",
       "bytes": 11341486,
-      "sha256": "477db3f009c118823a5f9ebe15f1e96c1c464165715ba28a9884290f61addf52"
+      "sha256": "477db3f009c118823a5f9ebe15f1e96c1c464165715ba28a9884290f61addf52",
+      "transport": {
+        "file": "ocr/transport-v1/477db3f009c118823a5f9ebe15f1e96c1c464165715ba28a9884290f61addf52.gz",
+        "bytes": 3555424,
+        "sha256": "8313451e205f04985216ea800306bd363188503180507f387e7634b1fe282e56"
+      }
     },
     {
       "file": "ocr/runtime-v1/engine.js",
       "bytes": 10476786,
-      "sha256": "7eae33fabde66e164ba1ca48988286a280075a6f460f3c239c88773138cc8f68"
+      "sha256": "7eae33fabde66e164ba1ca48988286a280075a6f460f3c239c88773138cc8f68",
+      "transport": {
+        "file": "ocr/transport-v1/7eae33fabde66e164ba1ca48988286a280075a6f460f3c239c88773138cc8f68.gz",
+        "bytes": 3405719,
+        "sha256": "1c439158a9bdf2a05fa6a8263a55c32693fe03b854e4c372c83d88ea65b3ee4a"
+      }
     },
     {
       "file": "ocr/runtime-v1/ort/ort-wasm-simd-threaded.jsep.mjs",
       "bytes": 46489,
-      "sha256": "33949a3310b723a3ee14dc2da989e55060de26a75e2346095a150a042c9aad4e"
+      "sha256": "33949a3310b723a3ee14dc2da989e55060de26a75e2346095a150a042c9aad4e",
+      "transport": {
+        "file": "ocr/transport-v1/33949a3310b723a3ee14dc2da989e55060de26a75e2346095a150a042c9aad4e.gz",
+        "bytes": 15677,
+        "sha256": "47112d779a70800c53fc9c01ebf6cc5a9d0a9d537d1c5bf1275183b7950f34b2"
+      }
     },
     {
       "file": "ocr/runtime-v1/ort/ort-wasm-simd-threaded.jsep.wasm",
@@ -33,17 +58,33 @@
       "parts": [
         "ocr/runtime-v1/ort/ort-wasm-simd-threaded.jsep.wasm.part1",
         "ocr/runtime-v1/ort/ort-wasm-simd-threaded.jsep.wasm.part2"
-      ]
+      ],
+      "transport": {
+        "file": "ocr/transport-v1/411b39a77bb006ce0cf17b30c978c66a130ebb2ba39c8dfdbdc9c1c5a251ae76.gz",
+        "bytes": 6112464,
+        "sha256": "78e7d1c523f0b3c623f5a0174a134f616b6bb7c3589136ab0571580e83b9f976"
+      }
     },
     {
       "file": "ocr/models-v1/PP-OCRv6_small_det_onnx_infer.tar",
       "bytes": 9891840,
-      "sha256": "d218f6fbf0f1c23d2161bd6ac7f5eaa6104fa89955c09290497e31008e2618e4"
+      "sha256": "d218f6fbf0f1c23d2161bd6ac7f5eaa6104fa89955c09290497e31008e2618e4",
+      "transport": {
+        "file": "ocr/transport-v1/d218f6fbf0f1c23d2161bd6ac7f5eaa6104fa89955c09290497e31008e2618e4.gz",
+        "bytes": 7519859,
+        "sha256": "3a15acd1fe3b670c1b232ef97625003cd7b9f3fe1f9af320d341e8bde0931ec6"
+      }
     },
     {
       "file": "ocr/models-v1/PP-OCRv6_small_rec_onnx_infer.tar",
       "bytes": 21319680,
-      "sha256": "d267ab077a44a0eedb1ea8f8c542d263f211de8e9d7a029bf9fcfff7e5a88fb1"
+      "sha256": "d267ab077a44a0eedb1ea8f8c542d263f211de8e9d7a029bf9fcfff7e5a88fb1",
+      "transport": {
+        "file": "ocr/transport-v1/d267ab077a44a0eedb1ea8f8c542d263f211de8e9d7a029bf9fcfff7e5a88fb1.gz",
+        "bytes": 18512302,
+        "sha256": "e80107b3b4a051123d237be7e4ea99eea9316b67c95686fdaa30a0fec23b9850"
+      }
     }
-  ]
+  ],
+  "cdnRevision": "47399c62f4c2fa6b0dfd8ad2e0d0e634a31efcb3"
 }

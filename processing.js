@@ -132,15 +132,41 @@ export function paintMasks(context, masks, scale = 1, outlines = false) {
     const mask = masks[index];
     const x = Math.floor(mask.x * scale), y = Math.floor(mask.y * scale);
     const width = Math.ceil(mask.width * scale), height = Math.ceil(mask.height * scale);
-    const block = Math.max(3, Math.round(mask.height * scale / 3));
+    const style = mask.kind === 'manual' ? mask.style || 'mosaic' : 'mosaic';
+    context.save(); context.globalAlpha = 1; context.globalCompositeOperation = 'source-over';
+    // Manual cells remain fixed in source pixels, independently of selection size.
+    const block = mask.kind === 'manual'
+      ? Math.max(1, Math.round(24 * scale))
+      : Math.max(3, Math.round(mask.height * scale / 3));
     let seed = ((mask.x * 73856093) ^ (mask.y * 19349663) ^ (index * 83492791)) >>> 0;
-    for (let row = 0; row < height; row += block) for (let col = 0; col < width; col += block) {
-      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-      const grey = [190, 205, 218, 230, 240][seed % 5];
-      context.fillStyle = `rgb(${grey},${grey},${grey})`;
-      context.fillRect(x + col, y + row, Math.min(block, width - col), Math.min(block, height - row));
+    if (style === 'solid') {
+      context.fillStyle = '#ededed'; context.fillRect(x, y, width, height);
+    } else if (style === 'smear') {
+      // An opaque base removes the original pixels before adding a light brush texture.
+      context.fillStyle = '#f5f5f5'; context.fillRect(x, y, width, height);
+      context.save(); context.beginPath(); context.rect(x, y, width, height); context.clip();
+      const random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+      const count = Math.max(3, Math.ceil(mask.width * mask.height / 14000));
+      context.lineCap = 'round';
+      for (let stroke = 0; stroke < count; stroke++) {
+        const cx = x + random() * width, cy = y + random() * height;
+        const length = (90 + random() * 130) * scale, grey = Math.round(229 + random() * 17);
+        context.strokeStyle = `rgb(${grey},${grey},${grey})`;
+        context.lineWidth = (18 + random() * 24) * scale;
+        context.beginPath(); context.moveTo(cx - length * .4, cy + length * .24);
+        context.quadraticCurveTo(cx, cy - length * .12, cx + length * .4, cy - length * .24); context.stroke();
+      }
+      context.restore();
+    } else {
+      for (let row = 0; row < height; row += block) for (let col = 0; col < width; col += block) {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        const grey = [190, 205, 218, 230, 240][seed % 5];
+        context.fillStyle = `rgb(${grey},${grey},${grey})`;
+        context.fillRect(x + col, y + row, Math.min(block, width - col), Math.min(block, height - row));
+      }
     }
     if (outlines) { context.strokeStyle = '#1b9b88'; context.lineWidth = Math.max(1, 2 * scale); context.strokeRect(x, y, width, height); }
+    context.restore();
   }
 }
 
@@ -164,7 +190,15 @@ export function paintWatermark(context, width, height, settings) {
   context.restore();
 }
 
-export function outputGeometry(left, right) {
+export function outputGeometry(left, right, direction = 'horizontal') {
+  if (direction === 'vertical') {
+    const width = Math.max(left.naturalWidth, right.naturalWidth);
+    const firstHeight = Math.round(left.naturalHeight * width / left.naturalWidth);
+    const secondHeight = Math.round(right.naturalHeight * width / right.naturalWidth);
+    const ratio = Math.min(1, Math.sqrt(12_000_000 / (width * (firstHeight + secondHeight))), 8192 / width, 8192 / (firstHeight + secondHeight));
+    const targetFirstHeight = Math.max(1, Math.floor(firstHeight * ratio)), targetSecondHeight = Math.max(1, Math.floor(secondHeight * ratio));
+    return { width: Math.max(1, Math.floor(width * ratio)), height: targetFirstHeight + targetSecondHeight, firstHeight: targetFirstHeight, secondHeight: targetSecondHeight, resized: ratio < 1 };
+  }
   const height = Math.max(left.naturalHeight, right.naturalHeight);
   const leftWidth = Math.round(left.naturalWidth * height / left.naturalHeight);
   const rightWidth = Math.round(right.naturalWidth * height / right.naturalHeight);
@@ -174,18 +208,22 @@ export function outputGeometry(left, right) {
   return { width: firstWidth + secondWidth, height: targetHeight, leftWidth: firstWidth, rightWidth: secondWidth, resized: ratio < 1 };
 }
 
-export async function composePair(left, right, settings) {
-  const geometry = outputGeometry(left.image, right.image);
+export async function composePair(left, right, settings, direction = 'horizontal') {
+  const vertical = direction === 'vertical';
+  const geometry = outputGeometry(left.image, right.image, direction);
   const canvas = document.createElement('canvas');
   canvas.width = geometry.width; canvas.height = geometry.height;
   const context = canvas.getContext('2d', { alpha: false });
   context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
   let offset = 0;
-  for (const [item, width] of [[left, geometry.leftWidth], [right, geometry.rightWidth]]) {
-    context.save(); context.translate(offset, 0);
-    context.drawImage(item.image, 0, 0, width, geometry.height);
-    paintMasks(context, item.masks, geometry.height / item.image.naturalHeight);
-    context.restore(); offset += width;
+  const images = vertical
+    ? [[left, geometry.width, geometry.firstHeight], [right, geometry.width, geometry.secondHeight]]
+    : [[left, geometry.leftWidth, geometry.height], [right, geometry.rightWidth, geometry.height]];
+  for (const [item, width, height] of images) {
+    context.save(); context.translate(vertical ? 0 : offset, vertical ? offset : 0);
+    context.drawImage(item.image, 0, 0, width, height);
+    paintMasks(context, item.masks, vertical ? width / item.image.naturalWidth : height / item.image.naturalHeight);
+    context.restore(); offset += vertical ? height : width;
   }
   paintWatermark(context, canvas.width, canvas.height, settings);
   try {
