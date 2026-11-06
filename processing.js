@@ -17,7 +17,64 @@ export function bounds(poly) {
 
 const charWeight = char => /[\u2e80-\uffef]/.test(char) && !/[，。：（）]/.test(char) ? 1 : /[ilI.,:;!|\s]/.test(char) ? .28 : /[（）()]/.test(char) ? .4 : .57;
 
-function textRegion(line, start, end, kind, imageWidth, imageHeight) {
+function tightenToInk(mask, target, pixelSource, imageWidth, imageHeight) {
+  if (!pixelSource) return mask;
+  const count = (target.match(/[0-9*＊•●]/g) || []).length;
+  if (!count) return mask;
+  const { canvas, image } = pixelSource;
+  canvas.width = Math.min(mask.width, imageWidth - mask.x);
+  canvas.height = Math.min(mask.height, imageHeight - mask.y);
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  context.drawImage(image, mask.x, mask.y, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
+  const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  const runs = [];
+  let run;
+  for (let x = 0; x < canvas.width; x++) {
+    let top = canvas.height, bottom = -1;
+    for (let y = 0; y < canvas.height; y++) {
+      const offset = (y * canvas.width + x) * 4;
+      if (pixels[offset + 3] > 200 && Math.max(pixels[offset], pixels[offset + 1], pixels[offset + 2]) < 170) {
+        top = Math.min(top, y); bottom = Math.max(bottom, y);
+      }
+    }
+    if (bottom >= 0) {
+      if (!run) run = { left: x, right: x, top, bottom };
+      else { run.right = x; run.top = Math.min(run.top, top); run.bottom = Math.max(run.bottom, bottom); }
+    } else if (run) { runs.push(run); run = undefined; }
+  }
+  if (run) runs.push(run);
+  const heights = runs.map(r => r.bottom - r.top + 1).filter(h => h >= mask.height * .25).sort((a,b) => a-b);
+  if (!heights.length) return mask;
+  const glyphHeight = heights[Math.floor(heights.length / 2)];
+  if (glyphHeight >= mask.height * .92) return mask;
+  const tall = r => r.bottom - r.top + 1 >= glyphHeight * .58;
+  let best;
+  for (let start = 0; start < runs.length; start++) {
+    if (!tall(runs[start])) continue;
+    let digits = 0;
+    for (let end = start; end < runs.length; end++) {
+      if (tall(runs[end])) digits++;
+      if (digits > count) break;
+      if (digits !== count || !tall(runs[end])) continue;
+      const group = runs.slice(start, end + 1);
+      const left = group[0].left, right = group[group.length - 1].right;
+      const top = Math.min(...group.map(r => r.top)), bottom = Math.max(...group.map(r => r.bottom));
+      // A decimal point may be a separate short run or touch a neighbouring digit.
+      const score = Math.abs((left + right) / 2 - mask.width / 2) * 4 / glyphHeight
+        + Math.abs(right - left + 1 - mask.width) / mask.width * .2
+        + group.filter(tall).reduce((sum,r) => sum + Math.max(0, r.bottom-r.top+1-glyphHeight*1.18) / glyphHeight, 0);
+      if (!best || score < best.score) best = { left, right, top, bottom, score };
+    }
+  }
+  if (!best) return mask;
+  const pad = Math.max(2, Math.round((best.bottom - best.top + 1) * .06));
+  const x = Math.max(0, mask.x + best.left - pad), y = Math.max(0, mask.y + best.top - pad);
+  const right = Math.min(imageWidth, mask.x + best.right + 1 + pad);
+  const bottom = Math.min(imageHeight, mask.y + best.bottom + 1 + pad);
+  return { ...mask, x, y, width: right - x, height: bottom - y };
+}
+
+function textRegion(line, start, end, kind, imageWidth, imageHeight, pixelSource) {
   const { x, y, width, height } = line.box;
   const weights = Array.from(line.text).map(charWeight);
   const total = weights.reduce((a, b) => a + b, 0);
@@ -26,14 +83,16 @@ function textRegion(line, start, end, kind, imageWidth, imageHeight) {
   const pad = Math.max(6, height * .2);
   const left = Math.max(0, x + width * before / total - pad);
   const top = Math.max(0, y - pad);
-  return { x: Math.floor(left), y: Math.floor(top), width: Math.ceil(Math.min(imageWidth - left, width * target / total + pad * 2)), height: Math.ceil(Math.min(imageHeight - top, height + pad * 2)), kind, source: 'auto' };
+  const mask = { x: Math.floor(left), y: Math.floor(top), width: Math.ceil(Math.min(imageWidth - left, width * target / total + pad * 2)), height: Math.ceil(Math.min(imageHeight - top, height + pad * 2)), kind, source: 'auto' };
+  return tightenToInk(mask, line.text.slice(start, end), pixelSource, imageWidth, imageHeight);
 }
 
-export function detectSensitive(items, imageWidth, imageHeight) {
+export function detectSensitive(items, imageWidth, imageHeight, image) {
+  const pixelSource = image && typeof document !== 'undefined' ? { image, canvas: document.createElement('canvas') } : null;
   const lines = items.filter(item => item.text && item.poly?.length >= 4).map(item => ({ ...item, text: item.text.replace(/\s+/g, ''), box: bounds(item.poly) }));
   const masks = [];
   const add = (line, match, kind) => {
-    const box = textRegion(line, match.index, match.index + match[0].length, kind, imageWidth, imageHeight);
+    const box = textRegion(line, match.index, match.index + match[0].length, kind, imageWidth, imageHeight, pixelSource);
     if (!masks.some(m => m.kind === kind && Math.abs(m.x - box.x) < 16 && Math.abs(m.y - box.y) < 16)) masks.push(box);
   };
   const isSameRow = (a, b) => Math.abs(a.box.y + a.box.height / 2 - b.box.y - b.box.height / 2) < Math.max(a.box.height, b.box.height) * .62;
@@ -62,6 +121,7 @@ export function detectSensitive(items, imageWidth, imageHeight) {
       }
     }
   }
+  if (pixelSource) pixelSource.canvas.width = pixelSource.canvas.height = 1;
   return masks;
 }
 
@@ -76,7 +136,7 @@ export function paintMasks(context, masks, scale = 1, outlines = false) {
     let seed = ((mask.x * 73856093) ^ (mask.y * 19349663) ^ (index * 83492791)) >>> 0;
     for (let row = 0; row < height; row += block) for (let col = 0; col < width; col += block) {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
-      const grey = [30, 65, 105, 145, 185][seed % 5];
+      const grey = [190, 205, 218, 230, 240][seed % 5];
       context.fillStyle = `rgb(${grey},${grey},${grey})`;
       context.fillRect(x + col, y + row, Math.min(block, width - col), Math.min(block, height - row));
     }
