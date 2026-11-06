@@ -11,6 +11,20 @@ let context, server;
 (async () => {
   const prefix = process.env.TEST_PREFIX || '/';
   server = require('../scripts/serve.cjs')({basePath:prefix});
+  if (process.env.VERIFY_DOWNLOAD_PROGRESS === '1') server.prependListener('request',(req,res) => {
+    if (!req.url.includes('/ocr/runtime-v1/assets/worker-entry-')) return;
+    const end = res.end.bind(res);
+    res.end = bytes => {
+      let offset = 0, timer;
+      const send = () => {
+        if (res.destroyed) return;
+        if (offset >= bytes.length) return end();
+        res.write(bytes.subarray(offset, offset + 65536)); offset += 65536;
+        timer = setTimeout(send, 10);
+      };
+      res.on('close',()=>clearTimeout(timer)); send(); return res;
+    };
+  });
   await new Promise(resolve => server.listen(0,'127.0.0.1',resolve));
   const port = server.address().port, base = `http://127.0.0.1:${port}${prefix}`;
   const browserType = variant === 'webkit' ? webkit : chromium;
@@ -25,12 +39,13 @@ let context, server;
   await page.evaluate(async()=>{const r=await navigator.serviceWorker.getRegistration();await r.update();});
   await page.waitForTimeout(300);
   await page.reload();
-  assert.equal(await page.locator('.intro h1 span').innerText(),'隐私打码加水印');
+  assert.equal(await page.locator('.intro h1').innerText(),'智能隐私拼图');
   assert.equal(await page.locator('.intro p').count(),0);
   await page.locator('#settings').evaluate(el=>el.open=true);
   assert.equal(await page.locator('#colorPalette button').count(),30);
   assert.equal(await page.locator('input[type="color"]').count(),0);
   assert.equal(await page.locator('#fontSize').getAttribute('type'),'range');
+  await page.locator('#fontSize').scrollIntoViewIfNeeded();
   const fontSlider = await page.locator('#fontSize').boundingBox();
   await page.mouse.click(fontSlider.x + fontSlider.width * .7, fontSlider.y + fontSlider.height / 2);
   const draggedSize = Number(await page.locator('#fontSize').inputValue());
@@ -55,6 +70,13 @@ let context, server;
   await page.locator('#closeHelp').click();
   pass('安装帮助可以打开和关闭');
   const files = ['1.PNG','2.JPG','3.PNG','4.PNG','5.JPG','6.PNG','7.PNG','8.PNG','9.PNG','10.PNG'].map(name=>path.join(samples,name));
+  await page.evaluate(() => {
+    window.downloadEvents = [];
+    new MutationObserver(() => {
+      const detail = document.getElementById('statusDetail').textContent;
+      if (detail.includes('下载识别组件') && detail.includes('MB')) window.downloadEvents.push({detail,value:document.getElementById('progress').value});
+    }).observe(document.getElementById('workbench'),{subtree:true,childList:true,attributes:true,attributeFilter:['value']});
+  });
   await page.locator('#fileInput').setInputFiles(files);
   await wait(10);
   const detected = await page.evaluate(async()=>{const {state}=await import('./app.js');return state.items.map(item=>({name:item.name,status:item.status,masks:item.masks}));});
@@ -62,8 +84,26 @@ let context, server;
   assert.deepEqual(detected.map(i=>i.masks.map(m=>m.kind)),[[],['card','balance'],[],['card','balance'],[],['card','balance'],[],['card'],[],['card','balance']]);
   assert.equal(await page.locator('.result-card').count(),5);
   pass('10 张真实素材生成 5 组，5 处尾号和 4 处余额 / 额度全部识别');
+  if (process.env.VERIFY_DOWNLOAD_PROGRESS === '1') {
+    const progress = await page.evaluate(()=>window.downloadEvents);
+    const partial = [...new Set(progress.filter(e=>e.value>0&&e.value<1).map(e=>e.detail))];
+    assert.ok(partial.length >= 12,`Download UI did not advance during streamed file: ${partial.length}`);
+    await fs.writeFile(path.join(dest,`download-progress-${variant}.json`),JSON.stringify(progress,null,2));
+    pass('首次下载过程中实时显示百分比、MB 和进度条');
+  }
+  if (process.env.OUTPUT_SAMPLES_DIR) {
+    await fs.mkdir(process.env.OUTPUT_SAMPLES_DIR,{recursive:true});
+    for (let index=0;index<5;index++) {
+      const b64 = await page.evaluate(async index => {
+        const {state}=await import('./app.js'); const data = new Uint8Array(await state.results[index].blob.arrayBuffer());
+        let binary=''; for(let i=0;i<data.length;i+=32768) binary+=String.fromCharCode(...data.subarray(i,i+32768)); return btoa(binary);
+      },index);
+      await fs.writeFile(path.join(process.env.OUTPUT_SAMPLES_DIR,`${index*2+1}+${index*2+2}.png`),Buffer.from(b64,'base64'));
+    }
+    await fs.writeFile(path.join(dest,`tight-masks-${variant}.json`),JSON.stringify(detected,null,2));
+  }
   // Independently measured inner glyph rectangles from the source images.
-  for (const [index,kind,rectangle] of [[1,'card',[450,672,109,35]],[1,'balance',[605,1036,190,30]],[3,'card',[450,687,109,35]],[3,'balance',[605,1052,190,30]],[5,'card',[634,780,94,30]],[5,'balance',[409,956,194,34]],[7,'card',[514,684,87,30]],[9,'card',[624,937,101,29]],[9,'balance',[409,1117,110,32]]]) {
+  for (const [index,kind,rectangle] of [[1,'card',[457,670,106,34]],[1,'balance',[597,1031,196,34]],[3,'card',[457,685,106,34]],[3,'balance',[597,1046,183,34]],[5,'card',[626,776,96,34]],[5,'balance',[413,956,184,34]],[7,'card',[506,684,90,33]],[9,'card',[618,935,106,34]],[9,'balance',[412,1115,101,34]]]) {
     const [x,y,w,h]=rectangle;
     assert.ok(detected[index].masks.some(m=>m.kind===kind&&m.x<=x&&m.y<=y&&m.x+m.width>=x+w&&m.y+m.height>=y+h),`Uncovered ${index} ${kind}`);
   }

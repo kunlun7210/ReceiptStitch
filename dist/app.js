@@ -37,12 +37,19 @@ function status(title, detail = '', error = false) {
 function escapeHTML(value) { return String(value).replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[char])); }
 function freeResult(result) { if (result.url) URL.revokeObjectURL(result.url); }
 function updateOfflineStatus() { $('offlineStatus').textContent = '本地识别组件已准备好，可离线使用。照片仅保留在当前页面。'; }
+function updateRangeTracks() {
+  for (const id of ['transparency','fontSize']) {
+    const input = $(id);
+    input.style.setProperty('--range-progress',`${(Number(input.value)-Number(input.min))/(Number(input.max)-Number(input.min))*100}%`);
+  }
+}
 
 function writeSettings() {
   const s = state.settings;
   $('watermarkText').value = s.text; $('fontSize').value = s.fontSize; $('transparency').value = s.transparency;
   $('transparencyValue').textContent = `${s.transparency}%`;
   $('fontSizeValue').textContent = `${s.fontSize} pt`;
+  updateRangeTracks();
   renderPalette();
   $('settingsSummary').textContent = `${s.fontSize} pt · 透明度 ${s.transparency}% · ${colorName(s.color)} · 平铺`;
 }
@@ -57,6 +64,7 @@ function readSettings() {
   try { localStorage.setItem('receipt-stitch-settings', JSON.stringify(state.settings)); } catch {}
   $('transparencyValue').textContent = `${state.settings.transparency}%`;
   $('fontSizeValue').textContent = `${state.settings.fontSize} pt`;
+  updateRangeTracks();
   $('colorLabel').textContent = colorName(state.settings.color);
   $('settingsSummary').textContent = `${state.settings.fontSize} pt · 透明度 ${state.settings.transparency}% · ${$('colorLabel').textContent} · 平铺`;
   invalidateResults();
@@ -117,8 +125,19 @@ async function analyzePending() {
     item.status = 'processing'; renderPhotos();
     try {
       status(`正在识别 ${completed + 1} / ${targets.length}`, item.name);
-      const lines = await scanImage(item.image, message => status('准备本地文字识别', message));
-      const automatic = detectSensitive(lines, item.image.naturalWidth, item.image.naturalHeight);
+      const lines = await scanImage(item.image, (message, info) => {
+        if (info?.phase === 'recognizing') {
+          status(`正在识别 ${completed + 1} / ${targets.length}`, item.name);
+          $('progress').setAttribute('aria-label','图片识别进度');
+          $('progress').value = completed / targets.length;
+        } else {
+          status(info?.phase === 'download' ? '下载本地识别组件' : '准备本地文字识别', message);
+          $('progress').setAttribute('aria-label','识别组件下载进度');
+          if (info?.total) $('progress').value = info.loaded / info.total;
+          else $('progress').removeAttribute('value');
+        }
+      });
+      const automatic = detectSensitive(lines, item.image.naturalWidth, item.image.naturalHeight, item.image);
       // Never overwrite edits made while inference was running.
       item.lines = lines;
       item.masks = [...automatic, ...item.masks.filter(m => m.source === 'manual')];
