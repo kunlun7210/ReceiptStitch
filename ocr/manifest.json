@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "file": "ocr/runtime-v1/assets/ort.min-DwuZQYb1.js",
+      "bytes": 350692,
+      "sha256": "5595b039f9d6719df9584c6e18c31bfae861368c0050cdbb5224fb69ecaf2d00"
+    },
+    {
+      "file": "ocr/runtime-v1/assets/preload-helper-CWYXBt0P.js",
+      "bytes": 2204,
+      "sha256": "4c979b7784f726964c1420849976b4642f38d0b337617768942ec02379038109"
+    },
+    {
+      "file": "ocr/runtime-v1/assets/worker-entry-C9UNuyOJ-EhIzhVdm.js",
+      "bytes": 11341486,
+      "sha256": "477db3f009c118823a5f9ebe15f1e96c1c464165715ba28a9884290f61addf52"
+    },
+    {
+      "file": "ocr/runtime-v1/engine.js",
+      "bytes": 10476786,
+      "sha256": "7eae33fabde66e164ba1ca48988286a280075a6f460f3c239c88773138cc8f68"
+    },
+    {
+      "file": "ocr/runtime-v1/ort/ort-wasm-simd-threaded.jsep.mjs",
+      "bytes": 46489,
+      "sha256": "33949a3310b723a3ee14dc2da989e55060de26a75e2346095a150a042c9aad4e"
+    },
+    {
+      "file": "ocr/runtime-v1/ort/ort-wasm-simd-threaded.jsep.wasm",
+      "bytes": 26239907,
+      "sha256": "411b39a77bb006ce0cf17b30c978c66a130ebb2ba39c8dfdbdc9c1c5a251ae76",
+      "parts": [
+        "ocr/runtime-v1/ort/ort-wasm-simd-threaded.jsep.wasm.part1",
+        "ocr/runtime-v1/ort/ort-wasm-simd-threaded.jsep.wasm.part2"
+      ]
+    },
+    {
+      "file": "ocr/models-v1/PP-OCRv6_small_det_onnx_infer.tar",
+      "bytes": 9891840,
+      "sha256": "d218f6fbf0f1c23d2161bd6ac7f5eaa6104fa89955c09290497e31008e2618e4"
+    },
+    {
+      "file": "ocr/models-v1/PP-OCRv6_small_rec_onnx_infer.tar",
+      "bytes": 21319680,
+      "sha256": "d267ab077a44a0eedb1ea8f8c542d263f211de8e9d7a029bf9fcfff7e5a88fb1"
+    }
+  ]
+}
