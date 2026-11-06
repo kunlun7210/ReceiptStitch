@@ -280,7 +280,7 @@ $('saveAllButton').addEventListener('click', () => { const valid = state.results
 
 function openEditor(item) {
   if (!item) return;
-  resetEditorGesture(); editing = item; $('editorZoom').value = 'fit'; setDrawMode(true);
+  resetEditorGesture(); editing = item; $('editorZoom').value = '1'; setDrawMode(true);
   const previous = item.masks.filter(mask => mask.kind === 'manual').at(-1);
   editingStyle = previous ? previous.style || 'mosaic' : state.manualMaskStyle;
   writeMaskStyle();
@@ -318,7 +318,7 @@ function redrawEditor() {
   const padding = getComputedStyle(viewport), zoom = $('editorZoom').value;
   const availableWidth = Math.max(1, viewport.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight));
   const availableHeight = Math.max(1, viewport.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom));
-  const fitWidth = Math.min(650, availableWidth) / editing.image.naturalWidth;
+  const fitWidth = availableWidth / editing.image.naturalWidth;
   const requestedRatio = zoom === 'fit' ? Math.min(1, fitWidth, availableHeight / editing.image.naturalHeight) : Math.min(1, fitWidth * Number(zoom));
   canvas.width = Math.max(1, Math.floor(editing.image.naturalWidth * requestedRatio));
   const ratio = canvas.width / editing.image.naturalWidth;
