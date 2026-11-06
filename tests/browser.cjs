@@ -166,8 +166,10 @@ let context, server;
   pass('交换左右和照片前移确实改变配对顺序');
   await page.locator('.photo-item').last().locator('[data-photo-action="remove"]').click();
   await page.evaluate(async()=>{const {state}=await import('./app.js');await state.pendingRender});
-  assert.equal(await page.locator('#pairHint').isVisible(),true);assert.match(await page.locator('#pairHint').innerText(),/最后 1 张/);
-  pass('奇数张保留待配对照片并提示补选');
+  assert.equal(await page.locator('#pairHint').isVisible(),true);assert.match(await page.locator('#pairHint').innerText(),/最后 1 张将单独/);
+  assert.equal(await page.locator('.result-card').count(),5);assert.equal(await page.locator('[data-result="4"] [data-result-action="save"]').isEnabled(),true);
+  assert.equal(await page.locator('[data-result="4"] [data-result-action="right"]').count(),0);
+  pass('奇数张的最后一张单独生成成品并可保存');
 
   const layouts=[];
   for(const width of [320,375,393,430,768,1280]){

@@ -28,15 +28,15 @@
 
     <section class="upload-panel" id="dropZone" aria-labelledby="uploadTitle">
       <div class="upload-symbol" aria-hidden="true"><svg viewBox="0 0 48 48"><rect x="5" y="11" width="27" height="32" rx="5"/><path d="M12 34l6-7 5 5 3-3 6 7"/><circle cx="15" cy="20" r="2"/><path d="M24 5h14a5 5 0 0 1 5 5v22M37 15v12M31 21h12"/></svg></div>
-      <h2 id="uploadTitle">选择要拼接的照片</h2>
-      <p id="uploadOrderHint">每 2 张一组，按选择顺序左右排列</p>
+      <h2 id="uploadTitle">选择要处理的图片</h2>
+      <p id="uploadOrderHint">按选择顺序左右排列</p>
       <button class="primary" id="chooseButton"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>从相册选择</button>
       <input type="file" id="fileInput" accept="image/*" multiple hidden>
       <div class="upload-note">可分次添加 · 支持批量 · 保留原图</div>
     </section>
 
     <section class="workbench" id="workbench" hidden aria-labelledby="photosTitle">
-      <div class="section-title"><div><h2 id="photosTitle">已选照片 <span id="photoCount">0</span></h2><p id="photoOrderHint">相邻两张为一组，可调整顺序</p></div><button class="text-button" id="clearButton">清空</button></div>
+      <div class="section-title"><div><h2 id="photosTitle">已选照片 <span id="photoCount">0</span></h2><p id="photoOrderHint">单张可直接处理；多张按选择顺序左右排列，可调整顺序</p></div><button class="text-button" id="clearButton">清空</button></div>
       <div class="photo-list" id="photoList"></div>
       <button class="add-more" id="addMoreButton">＋ 继续添加照片</button>
       <div class="status-box" role="status" aria-live="polite"><span class="status-dot" id="statusDot"></span><div><strong id="statusTitle">准备识别</strong><p id="statusDetail">照片只在当前设备处理</p></div><button class="text-button" id="retryButton" hidden>重试识别</button></div>
@@ -61,12 +61,12 @@
           <label class="stitch-option"><input type="radio" name="stitchDirection" value="horizontal" checked><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="2" y="3" width="12" height="20" rx="2"/><rect x="18" y="3" width="12" height="20" rx="2"/></svg><strong>横向拼接</strong><small>第一张在左，第二张在右</small></span></label>
           <label class="stitch-option"><input type="radio" name="stitchDirection" value="vertical"><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="5" y="1" width="22" height="10" rx="2"/><rect x="5" y="15" width="22" height="10" rx="2"/></svg><strong>竖向拼接</strong><small>第一张在上，第二张在下</small></span></label>
         </fieldset>
-        <p class="stitch-hint full" id="stitchHint">两张照片按同高拼接，保留完整画面。</p>
+        <p class="stitch-hint full" id="stitchHint">单张图片直接打码加水印；两张图片按同高拼接，保留完整画面。</p>
       </div>
     </details>
 
     <section id="resultsSection" class="results-section" hidden aria-labelledby="resultsTitle">
-      <div class="section-title"><div><h2 id="resultsTitle">拼接结果 <span id="resultCount">0</span></h2><p>检查遮挡后，再保存到相册</p></div><button class="primary compact" id="saveAllButton" disabled>保存全部</button></div>
+      <div class="section-title"><div><h2 id="resultsTitle">处理结果 <span id="resultCount">0</span></h2><p>检查遮挡后，再保存到相册</p></div><button class="primary compact" id="saveAllButton" disabled>保存全部</button></div>
       <p class="pair-hint" id="pairHint" hidden></p>
       <div id="results" class="results"></div>
     </section>
@@ -101,12 +101,12 @@
   </dialog>
   <dialog id="helpDialog" class="help-dialog">
     <div class="dialog-heading"><h2>把智能隐私拼图放进主屏幕</h2><button id="closeHelp" class="icon-button" aria-label="关闭说明">×</button></div>
-    <ol class="help-list"><li>在 iPhone 的 <strong>Safari</strong> 中打开本页。</li><li>点“分享”，选择<strong>“添加到主屏幕”</strong>，保留“作为网页 App 打开”。</li><li>打开主屏幕图标，选 2 张照片；批量时每相邻 2 张配成一组。</li><li>等待识别，点照片检查或补框，再点<strong>“保存图片”</strong>。在系统面板选择“存储图像”。</li></ol>
+    <ol class="help-list"><li>在 iPhone 的 <strong>Safari</strong> 中打开本页。</li><li>点“分享”，选择<strong>“添加到主屏幕”</strong>，保留“作为网页 App 打开”。</li><li>打开主屏幕图标，选择一张或多张图片。单张直接打码加水印；多张时相邻两张拼接，最后落单的一张单独处理。</li><li>等待识别，点图片检查或补框，再点<strong>“保存图片”</strong>。在系统面板选择“存储图像”。</li></ol>
     <div class="help-note">支持“银行卡尾号 / 卡号尾号 / 尾号”和“可用余额 / 可用额度”。交易金额保留。横向按同高、竖向按同宽拼接，保留完整画面。</div>
     <p class="help-note">首次需要联网准备约 40 MB 的本地识别组件。准备完成后，本工具可离线识别；浏览器清理缓存后需要重新准备。关闭页面会清空照片，水印设置会保留。</p>
     <button class="secondary full-width" id="prepareButton">提前下载识别模型</button><p class="model-download-status" id="prepareSource">默认下载源：jsDelivr</p><progress id="prepareProgress" max="1" value="0" aria-label="识别模型下载进度" hidden></progress><p id="prepareStatus" role="status"></p>
   </dialog>
-  <dialog id="saveDialog" class="help-dialog"><div class="dialog-heading"><h2>保存到相册</h2><button id="closeSave" class="icon-button" aria-label="关闭保存图片">×</button></div><p>长按下方图片，选择“存储到照片”。</p><img id="saveImage" alt="已打码并添加水印的拼接结果"></dialog>
+  <dialog id="saveDialog" class="help-dialog"><div class="dialog-heading"><h2>保存到相册</h2><button id="closeSave" class="icon-button" aria-label="关闭保存图片">×</button></div><p>长按下方图片，选择“存储到照片”。</p><img id="saveImage" alt="已打码并添加水印的处理结果"></dialog>
   <script type="module" src="./app.js"></script>
 </body>
 </html>

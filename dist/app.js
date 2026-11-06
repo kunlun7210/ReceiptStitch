@@ -92,9 +92,9 @@ function writeStitchSettings() {
   document.querySelector(`input[name="stitchDirection"][value="${state.stitchDirection}"]`).checked = true;
   $('stitchSummary').textContent = vertical ? '竖向拼接 · 第一张在上' : '横向拼接 · 第一张在左';
   $('stitchStep').textContent = '拼接';
-  $('uploadOrderHint').textContent = `每 2 张一组，按选择顺序${vertical ? '上下' : '左右'}排列`;
-  $('photoOrderHint').textContent = `相邻两张为一组，${vertical ? '上下' : '左右'}排列，可调整顺序`;
-  $('stitchHint').textContent = `两张照片按同${vertical ? '宽' : '高'}拼接，保留完整画面。`;
+  $('uploadOrderHint').textContent = `按选择顺序${vertical ? '上下' : '左右'}排列`;
+  $('photoOrderHint').textContent = `单张可直接处理；多张按选择顺序${vertical ? '上下' : '左右'}排列，可调整顺序`;
+  $('stitchHint').textContent = `单张图片直接打码加水印；两张图片按同${vertical ? '宽' : '高'}拼接，保留完整画面。`;
 }
 $('stitchSettings').addEventListener('change', event => {
   if (event.target.name !== 'stitchDirection') return;
@@ -223,33 +223,34 @@ function queueRender() {
 }
 async function renderResults(revision) {
   if (revision !== state.revision) return;
-  const pairs = Math.floor(state.items.length / 2);
+  const groups = Math.ceil(state.items.length / 2);
   $('resultsSection').hidden = !state.items.length;
-  $('resultCount').textContent = pairs;
-  $('pairHint').hidden = state.items.length % 2 === 0;
-  $('pairHint').textContent = `最后 1 张还没有配对。再添加 1 张，即可生成第 ${pairs + 1} 组。`;
+  $('resultCount').textContent = groups;
+  $('pairHint').hidden = state.items.length < 3 || state.items.length % 2 === 0;
+  $('pairHint').textContent = '最后 1 张将单独打码并加水印，也可继续添加图片进行拼接。';
   const next = [];
   const settings = { ...state.settings };
   const direction = state.stitchDirection, vertical = direction === 'vertical';
-  for (let i = 0; i < pairs; i++) {
+  for (let i = 0; i < groups; i++) {
     if (revision !== state.revision) { next.forEach(freeResult); return; }
     const left = state.items[i * 2], right = state.items[i * 2 + 1];
-    const usable = [left, right].every(item => item.status === 'ready' || item.status === 'error' && item.reviewed);
-    if (!usable) { next.push({ left, right, index: i, error: [left,right].some(item => item.status === 'error') ? '识别未完成，请重试或手动检查两张照片。' : '正在识别照片，完成后自动生成…' }); continue; }
+    const items = right ? [left, right] : [left];
+    const usable = items.every(item => item.status === 'ready' || item.status === 'error' && item.reviewed);
+    if (!usable) { next.push({ left, right, index: i, error: items.some(item => item.status === 'error') ? '识别未完成，请重试或逐张手动检查图片。' : '正在识别图片，完成后自动生成…' }); continue; }
     try {
       const output = await composePair(left, right, settings, direction);
-      next.push({ ...output, left, right, index: i, url: URL.createObjectURL(output.blob), file: new File([output.blob], `${String(i + 1).padStart(2,'0')}-收款拼图.png`, { type: 'image/png' }) });
+      next.push({ ...output, left, right, index: i, url: URL.createObjectURL(output.blob), file: new File([output.blob], `${String(i + 1).padStart(2,'0')}-${right ? '收款拼图' : '隐私图片'}.png`, { type: 'image/png' }) });
     } catch (error) { next.push({ left, right, index:i, error: error.message }); }
   }
   if (revision !== state.revision) { next.forEach(freeResult); return; }
   state.results.forEach(freeResult); state.results = next;
   $('results').innerHTML = next.map(result => {
-    const masks = [...result.left.masks, ...result.right.masks];
+    const masks = [...result.left.masks, ...(result.right?.masks || [])], single = !result.right;
     const cards = masks.filter(m => m.kind === 'card').length, balances = masks.filter(m => m.kind === 'balance').length, manuals = masks.filter(m => m.kind === 'manual').length;
     const description = result.error ? '请先完成识别或手动检查' : masks.length ? [cards ? `尾号 ${cards} 处` : '', balances ? `余额 / 额度 ${balances} 处` : '', manuals ? `补框 ${manuals} 处` : ''].filter(Boolean).join(' · ') : '未发现目标字段，可点照片检查或补框';
-    return `<article class="result-card" data-result="${result.index}"><div class="result-heading"><h3>第 ${result.index + 1} 组 <span>${result.index * 2 + 1} + ${result.index * 2 + 2}</span></h3><button data-result-action="swap" ${state.busy ? 'disabled' : ''}>${vertical ? '⇅ 交换上下' : '⇄ 交换左右'}</button></div>
-      <button class="result-preview" data-result-action="preview" aria-label="放大查看第 ${result.index + 1} 组结果">${result.url ? `<img src="${result.url}" alt="第 ${result.index + 1} 组：已遮挡敏感信息、${vertical ? '竖向' : '横向'}拼接并添加水印"><span class="preview-zoom">⊕</span>` : `<span class="generating">${escapeHTML(result.error)}</span>`}</button>
-      <div class="result-info"><p class="mask-summary${!masks.length || result.error ? ' warn' : ''}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2l6 2v5c0 4-6 8-6 8S4 13 4 9V4l6-2Z"/><path d="m7 9 2 2 4-4"/></svg>${description}</p><div class="result-actions"><button class="secondary" data-result-action="left">检查${vertical ? '上' : '左'}图</button><button class="secondary" data-result-action="right">检查${vertical ? '下' : '右'}图</button><button class="primary compact" data-result-action="save" ${result.url ? '' : 'disabled'}>保存图片</button></div>${result.url ? `<p class="result-detail">${result.width} × ${result.height} · PNG${result.resized ? ' · 已适配手机导出尺寸' : ' · 完整画面'}</p>` : ''}</div></article>`;
+    return `<article class="result-card" data-result="${result.index}"><div class="result-heading"><h3>第 ${result.index + 1} ${state.items.length === 1 ? '张' : '组'} <span>${single ? `${result.index * 2 + 1} · 单张处理` : `${result.index * 2 + 1} + ${result.index * 2 + 2}`}</span></h3>${single ? '' : `<button data-result-action="swap" ${state.busy ? 'disabled' : ''}>${vertical ? '⇅ 交换上下' : '⇄ 交换左右'}</button>`}</div>
+      <button class="result-preview" data-result-action="preview" aria-label="放大查看第 ${result.index + 1} 组结果">${result.url ? `<img src="${result.url}" alt="第 ${result.index + 1} 组：已遮挡敏感信息${single ? '' : `、${vertical ? '竖向' : '横向'}拼接`}并添加水印"><span class="preview-zoom">⊕</span>` : `<span class="generating">${escapeHTML(result.error)}</span>`}</button>
+      <div class="result-info"><p class="mask-summary${!masks.length || result.error ? ' warn' : ''}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2l6 2v5c0 4-6 8-6 8S4 13 4 9V4l6-2Z"/><path d="m7 9 2 2 4-4"/></svg>${description}</p><div class="result-actions"><button class="secondary" data-result-action="left">检查${single ? '图片' : vertical ? '上图' : '左图'}</button>${single ? '' : `<button class="secondary" data-result-action="right">检查${vertical ? '下' : '右'}图</button>`}<button class="primary compact" data-result-action="save" ${result.url ? '' : 'disabled'}>保存图片</button></div>${result.url ? `<p class="result-detail">${result.width} × ${result.height} · PNG${result.resized ? ' · 已适配手机导出尺寸' : ' · 完整画面'}</p>` : ''}</div></article>`;
   }).join('');
   $('saveAllButton').disabled = next.length === 0 || next.some(result => !result.file) || state.busy;
 }
@@ -258,7 +259,7 @@ $('results').addEventListener('click', event => {
   const result = state.results[Number(button.closest('[data-result]').dataset.result)]; if (!result) return;
   const action = button.dataset.resultAction;
   if (action === 'left' || action === 'right') return openEditor(result[action]);
-  if (action === 'swap') { if (state.busy) return; const i = result.index * 2; [state.items[i],state.items[i+1]] = [state.items[i+1],state.items[i]]; renderPhotos(); return invalidateResults(0); }
+  if (action === 'swap') { if (state.busy || !result.right) return; const i = result.index * 2; [state.items[i],state.items[i+1]] = [state.items[i+1],state.items[i]]; renderPhotos(); return invalidateResults(0); }
   if (action === 'preview' && result.url) return showSave(result);
   if (action === 'save' && result.file) shareFiles([result.file], result);
 });
