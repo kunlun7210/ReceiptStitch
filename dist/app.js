@@ -4,6 +4,8 @@ import { scanImage, prepareOCR, ocrCacheStatus } from './ocr.js';
 const $ = id => document.getElementById(id);
 export const state = { items: [], results: [], busy: false, settings: { ...DEFAULTS }, stitchDirection: 'horizontal', manualMaskStyle: 'mosaic', sequence: 0, revision: 0, pending: Promise.resolve() };
 let toastTimer, renderTimer, rendering = Promise.resolve(), editing = null, drawing = null, drawEnabled = true, editingStyle = 'mosaic';
+const editorPointers = new Map();
+let editorGesture = null, editorPanAnchor = null, scrollbarDrag = null, editorPageScroll = null;
 let modelPreparation = null, modelPhase = 'idle';
 const labels = { card: '卡尾号', balance: '可用余额 / 额度', manual: '手动遮挡' };
 const colorChoices = [...COMMON_COLORS, ...PALETTE];
@@ -278,17 +280,21 @@ $('saveAllButton').addEventListener('click', () => { const valid = state.results
 
 function openEditor(item) {
   if (!item) return;
-  editing = item; drawing = null; $('editorZoom').value = '1'; setDrawMode(true);
+  resetEditorGesture(); editing = item; $('editorZoom').value = 'fit'; setDrawMode(true);
   const previous = item.masks.filter(mask => mask.kind === 'manual').at(-1);
   editingStyle = previous ? previous.style || 'mosaic' : state.manualMaskStyle;
   writeMaskStyle();
   $('editorTitle').textContent = `检查第 ${state.items.indexOf(item) + 1} 张`;
   $('editorSubtitle').textContent = item.name;
+  editorPageScroll = { x: window.scrollX, y: window.scrollY };
+  document.body.style.setProperty('--editor-page-top', `${-editorPageScroll.y}px`);
+  document.body.style.setProperty('--editor-page-left', `${-editorPageScroll.x}px`);
+  document.body.classList.add('editor-page-locked');
   $('editor').showModal(); redrawEditor();
 }
-function setDrawMode(enabled) { drawEnabled = enabled; $('drawMode').classList.toggle('active', enabled); $('browseMode').classList.toggle('active', !enabled); $('drawMode').setAttribute('aria-pressed', String(enabled)); $('browseMode').setAttribute('aria-pressed', String(!enabled)); $('editorViewport').classList.toggle('browse', !enabled); }
+function setDrawMode(enabled) { resetEditorGesture(); drawEnabled = enabled; $('drawMode').classList.toggle('active', enabled); $('browseMode').classList.toggle('active', !enabled); $('drawMode').setAttribute('aria-pressed', String(enabled)); $('browseMode').setAttribute('aria-pressed', String(!enabled)); $('editorViewport').classList.toggle('browse', !enabled); if ($('editor').open) redrawEditor(); }
 $('drawMode').addEventListener('click', () => setDrawMode(true)); $('browseMode').addEventListener('click', () => setDrawMode(false));
-$('editorZoom').addEventListener('change', redrawEditor);
+$('editorZoom').addEventListener('change', () => { resetEditorGesture(); $('editorViewport').scrollTo(0, 0); redrawEditor(); });
 function writeMaskStyle() {
   for (const button of $('maskStyleOptions').querySelectorAll('[data-mask-style]')) {
     const active = button.dataset.maskStyle === editingStyle;
@@ -306,33 +312,117 @@ $('maskStyleOptions').addEventListener('click', event => {
 function redrawEditor() {
   if (!editing) return;
   const canvas = $('editorCanvas'), viewport = $('editorViewport');
-  const width = Math.min(650, viewport.clientWidth - (innerWidth <= 600 ? 16 : 24)) * Number($('editorZoom').value);
-  const ratio = Math.min(1, width / editing.image.naturalWidth);
-  canvas.width = Math.round(editing.image.naturalWidth * ratio); canvas.height = Math.round(editing.image.naturalHeight * ratio);
+  // The chip list can wrap, so lay out the footer before measuring the remaining image space.
+  $('maskList').innerHTML = editing.masks.map((mask, index) => `<button class="mask-chip" data-mask-index="${index}" aria-label="移除${labels[mask.kind]}遮挡 ${index + 1}">${labels[mask.kind]} ${index + 1}<span>×</span></button>`).join('');
+  $('undoMask').disabled = !editing.masks.some(mask => mask.source === 'manual');
+  const padding = getComputedStyle(viewport), zoom = $('editorZoom').value;
+  const availableWidth = Math.max(1, viewport.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight));
+  const availableHeight = Math.max(1, viewport.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom));
+  const fitWidth = Math.min(650, availableWidth) / editing.image.naturalWidth;
+  const requestedRatio = zoom === 'fit' ? Math.min(1, fitWidth, availableHeight / editing.image.naturalHeight) : Math.min(1, fitWidth * Number(zoom));
+  canvas.width = Math.max(1, Math.floor(editing.image.naturalWidth * requestedRatio));
+  const ratio = canvas.width / editing.image.naturalWidth;
+  canvas.height = Math.max(1, Math.round(editing.image.naturalHeight * ratio));
   canvas.style.width = `${canvas.width}px`; canvas.style.height = `${canvas.height}px`;
   const context = canvas.getContext('2d'); context.drawImage(editing.image, 0, 0, canvas.width, canvas.height); paintMasks(context, editing.masks, ratio, true);
   if (drawing) { context.strokeStyle = '#ef913c'; context.lineWidth = 2; context.setLineDash([5,3]); context.strokeRect(drawing.x * ratio, drawing.y * ratio, (drawing.endX - drawing.x) * ratio, (drawing.endY - drawing.y) * ratio); }
-  $('maskList').innerHTML = editing.masks.map((mask, index) => `<button class="mask-chip" data-mask-index="${index}" aria-label="移除${labels[mask.kind]}遮挡 ${index + 1}">${labels[mask.kind]} ${index + 1}<span>×</span></button>`).join('');
-  $('undoMask').disabled = !editing.masks.some(mask => mask.source === 'manual');
+  if (zoom === 'fit') viewport.scrollTo(0, 0);
+  updateEditorScrollbar();
 }
 function editorPoint(event) { const rect = $('editorCanvas').getBoundingClientRect(); return { x: Math.min(editing.image.naturalWidth, Math.max(0,(event.clientX - rect.left) / rect.width * editing.image.naturalWidth)), y: Math.min(editing.image.naturalHeight, Math.max(0,(event.clientY - rect.top) / rect.height * editing.image.naturalHeight)) }; }
-$('editorCanvas').addEventListener('pointerdown', event => {
-  if (!drawEnabled || !editing || event.isPrimary === false) return;
-  event.preventDefault(); const point = editorPoint(event); drawing = { ...point, endX: point.x, endY: point.y }; $('editorCanvas').setPointerCapture(event.pointerId);
+function resetEditorGesture() {
+  const pointers = [...editorPointers.keys()];
+  editorPointers.clear(); drawing = null; editorGesture = null; editorPanAnchor = null;
+  for (const id of pointers) if ($('editorViewport').hasPointerCapture(id)) $('editorViewport').releasePointerCapture(id);
+}
+function editorPointerCenter() {
+  const points = [...editorPointers.values()];
+  return { x: points.reduce((sum, point) => sum + point.x, 0) / points.length, y: points.reduce((sum, point) => sum + point.y, 0) / points.length };
+}
+$('editorViewport').addEventListener('pointerdown', event => {
+  if (!editing || (event.pointerType === 'mouse' && event.button !== 0)) return;
+  event.preventDefault(); editorPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  try { $('editorViewport').setPointerCapture(event.pointerId); } catch {}
+  if (editorPointers.size > 1 || !drawEnabled || editorGesture === 'pan') {
+    drawing = null; editorGesture = 'pan'; editorPanAnchor = editorPointerCenter(); redrawEditor();
+  } else if (event.target === $('editorCanvas')) {
+    editorGesture = 'draw'; const point = editorPoint(event); drawing = { ...point, endX: point.x, endY: point.y };
+  }
 });
-$('editorCanvas').addEventListener('pointermove', event => { if (!drawing) return; const point = editorPoint(event); drawing.endX = point.x; drawing.endY = point.y; redrawEditor(); });
-$('editorCanvas').addEventListener('pointerup', event => {
-  if (!drawing) return;
-  const point = editorPoint(event), x = Math.min(drawing.x, point.x), y = Math.min(drawing.y, point.y), width = Math.abs(point.x - drawing.x), height = Math.abs(point.y - drawing.y);
-  if (width >= 7 && height >= 7) { editing.masks.push({ x:Math.floor(x), y:Math.floor(y), width:Math.ceil(width), height:Math.ceil(height), kind:'manual', source:'manual', style:editingStyle }); editing.manualRevision++; }
-  drawing = null; redrawEditor();
+$('editorViewport').addEventListener('pointermove', event => {
+  if (!editing || !editorPointers.has(event.pointerId)) return;
+  event.preventDefault(); editorPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+  if (editorGesture === 'pan') {
+    const center = editorPointerCenter(), viewport = $('editorViewport');
+    viewport.scrollLeft += editorPanAnchor.x - center.x; viewport.scrollTop += editorPanAnchor.y - center.y;
+    editorPanAnchor = center; updateEditorScrollbar();
+  } else if (drawing) { const point = editorPoint(event); drawing.endX = point.x; drawing.endY = point.y; redrawEditor(); }
 });
-$('editorCanvas').addEventListener('pointercancel', () => { drawing = null; redrawEditor(); });
+function endEditorPointer(event) {
+  if (!editorPointers.has(event.pointerId)) return;
+  if (event.type === 'pointerup' && editing && editorGesture === 'draw' && drawing) {
+    const point = editorPoint(event), x = Math.min(drawing.x, point.x), y = Math.min(drawing.y, point.y), width = Math.abs(point.x - drawing.x), height = Math.abs(point.y - drawing.y);
+    if (width >= 7 && height >= 7) { editing.masks.push({ x:Math.floor(x), y:Math.floor(y), width:Math.ceil(width), height:Math.ceil(height), kind:'manual', source:'manual', style:editingStyle }); editing.manualRevision++; }
+  }
+  drawing = null; editorPointers.delete(event.pointerId);
+  // Keep a two-finger gesture in pan mode until every finger is lifted.
+  if (editorPointers.size) { editorGesture = 'pan'; editorPanAnchor = editorPointerCenter(); }
+  else { editorGesture = null; editorPanAnchor = null; }
+  redrawEditor();
+}
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) $('editorViewport').addEventListener(type, endEditorPointer);
+function updateEditorScrollbar() {
+  const viewport = $('editorViewport'), bar = $('editorScrollbar'), thumb = $('editorScrollThumb');
+  const maximum = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+  bar.hidden = maximum <= 1;
+  if (bar.hidden) return;
+  const height = Math.min(bar.clientHeight, Math.max(32, bar.clientHeight * viewport.clientHeight / viewport.scrollHeight));
+  thumb.style.height = `${height}px`;
+  thumb.style.top = `${(bar.clientHeight - height) * viewport.scrollTop / maximum}px`;
+  bar.setAttribute('aria-valuemax', String(Math.ceil(maximum))); bar.setAttribute('aria-valuenow', String(Math.round(viewport.scrollTop)));
+}
+$('editorViewport').addEventListener('scroll', updateEditorScrollbar, { passive: true });
+function scrollEditorFromBar(clientY) {
+  const viewport = $('editorViewport'), bar = $('editorScrollbar'), thumb = $('editorScrollThumb');
+  const travel = bar.clientHeight - thumb.offsetHeight;
+  if (travel > 0) viewport.scrollTop = Math.max(0, Math.min(1, (clientY - bar.getBoundingClientRect().top - scrollbarDrag.offset) / travel)) * (viewport.scrollHeight - viewport.clientHeight);
+  updateEditorScrollbar();
+}
+$('editorScrollbar').addEventListener('pointerdown', event => {
+  if (event.pointerType === 'mouse' && event.button !== 0) return;
+  event.preventDefault(); resetEditorGesture(); redrawEditor();
+  const thumb = $('editorScrollThumb');
+  scrollbarDrag = { id: event.pointerId, offset: event.target === thumb ? event.clientY - thumb.getBoundingClientRect().top : thumb.offsetHeight / 2 };
+  try { $('editorScrollbar').setPointerCapture(event.pointerId); } catch {}
+  scrollEditorFromBar(event.clientY);
+});
+$('editorScrollbar').addEventListener('pointermove', event => { if (scrollbarDrag?.id === event.pointerId) { event.preventDefault(); scrollEditorFromBar(event.clientY); } });
+for (const type of ['pointerup', 'pointercancel', 'lostpointercapture']) $('editorScrollbar').addEventListener(type, event => { if (scrollbarDrag?.id === event.pointerId) scrollbarDrag = null; });
+$('editorScrollbar').addEventListener('keydown', event => {
+  const viewport = $('editorViewport'), maximum = viewport.scrollHeight - viewport.clientHeight;
+  const targets = { ArrowDown: viewport.scrollTop + 40, ArrowUp: viewport.scrollTop - 40, PageDown: viewport.scrollTop + viewport.clientHeight * .85, PageUp: viewport.scrollTop - viewport.clientHeight * .85, Home: 0, End: maximum };
+  if (event.key in targets) { event.preventDefault(); viewport.scrollTop = targets[event.key]; updateEditorScrollbar(); }
+});
 $('maskList').addEventListener('click', event => { const button = event.target.closest('[data-mask-index]'); if (!button || !editing) return; editing.masks.splice(Number(button.dataset.maskIndex),1); editing.manualRevision++; redrawEditor(); });
 $('undoMask').addEventListener('click', () => { if (!editing) return; const index = editing.masks.findLastIndex(mask => mask.source === 'manual'); if (index >= 0) { editing.masks.splice(index,1); editing.manualRevision++; redrawEditor(); } });
 $('closeEditor').addEventListener('click', () => { if (editing) editing.reviewed = true; $('editor').close(); });
-$('editor').addEventListener('close', async () => { const item = editing; editing = null; drawing = null; if (!item) return; await refreshThumbnail(item); renderPhotos(); invalidateResults(0); $('editorCanvas').width = $('editorCanvas').height = 1; });
+$('editor').addEventListener('close', async () => {
+  const item = editing; resetEditorGesture(); scrollbarDrag = null; editing = null;
+  document.body.classList.remove('editor-page-locked');
+  document.body.style.removeProperty('--editor-page-top'); document.body.style.removeProperty('--editor-page-left');
+  const restoreScroll = editorPageScroll; editorPageScroll = null;
+  if (restoreScroll) window.scrollTo(restoreScroll.x, restoreScroll.y);
+  if (!item) return;
+  await refreshThumbnail(item); renderPhotos(); invalidateResults(0); await state.pendingRender;
+  if (!editing) $('editorCanvas').width = $('editorCanvas').height = 1;
+  // Replacing the result cards can move WebKit's scroll anchor after the dialog closes.
+  if (restoreScroll && !editing) {
+    window.scrollTo(restoreScroll.x, restoreScroll.y);
+    requestAnimationFrame(() => { if (!editing && !$('editor').open) window.scrollTo(restoreScroll.x, restoreScroll.y); });
+  }
+});
 window.addEventListener('resize', () => { if (editing) redrawEditor(); });
+new ResizeObserver(() => { if (editing) redrawEditor(); }).observe($('editorViewport'));
 $('helpButton').addEventListener('click', () => $('helpDialog').showModal()); $('closeHelp').addEventListener('click', () => $('helpDialog').close());
 function updateModelButtons() {
   const disabled = ['loading', 'ready', 'unsupported'].includes(modelPhase);

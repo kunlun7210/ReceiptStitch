@@ -1,0 +1,151 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const sharp = require('sharp');
+const { chromium, webkit } = require('playwright');
+const root = path.resolve(__dirname, '..'), qa = path.resolve(root, '../qa'), outputs = path.resolve(root, '../../outputs');
+const variant = process.env.BROWSER || 'chrome';
+const scope = process.env.TEST_BASE ? 'live' : 'local';
+let browser, server;
+(async () => {
+  server = require('../scripts/serve.cjs')();
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  browser = await (variant === 'webkit' ? webkit : chromium).launch({ ...(variant === 'webkit' ? {} : { channel: 'chrome' }), headless: true });
+  const context = await browser.newContext({ viewport: { width: 393, height: 852 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true, acceptDownloads: true });
+  const page = await context.newPage(), errors = [], passes = [];
+  const pass = name => { passes.push(name); console.log('PASS', variant, name); };
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(process.env.TEST_BASE || `http://127.0.0.1:${server.address().port}/?source=origin`);
+  await page.locator('#fileInput').setInputFiles(['1.PNG', '2.JPG'].map(name => path.join(process.env.SAMPLE_DIR, name)));
+  await page.waitForFunction(async () => { const { state } = await import('./app.js'); return state.items.length === 2 && !state.busy; }, null, { timeout: 180000 });
+  const wait = () => page.evaluate(async () => { const { state } = await import('./app.js'); await state.pending; await state.pendingRender; });
+  await wait();
+  assert.deepEqual(await page.evaluate(async () => (await import('./app.js')).state.items.map(item => item.status)), ['ready', 'ready']);
+  await page.locator('[data-result="0"] [data-result-action="right"]').click();
+  const savedPageScroll = await page.locator('body').evaluate(el => -parseFloat(el.style.getPropertyValue('--editor-page-top')));
+  assert.ok(savedPageScroll > 0, 'exercise the dialog after scrolling the page to the results');
+  assert.equal(await page.locator('body').evaluate(el => el.classList.contains('editor-page-locked')), true);
+  assert.equal(await page.evaluate(() => scrollY), 0);
+  await page.evaluate(() => {
+    window.editorEvents = [];
+    window.scrollbarEvents = [];
+    window.dragEvents = [];
+    for (const type of ['pointermove', 'mousemove', 'dragstart', 'pointercancel']) document.addEventListener(type, event => window.dragEvents.push({ type, target: event.target.id, y: event.clientY, buttons: event.buttons }), true);
+    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'lostpointercapture']) document.getElementById('editorViewport').addEventListener(type, event => window.editorEvents.push({ type, id: event.pointerId, y: event.clientY, scroll: document.getElementById('editorViewport').scrollTop }));
+    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'lostpointercapture']) document.getElementById('editorScrollbar').addEventListener(type, event => window.scrollbarEvents.push({ type, id: event.pointerId, y: event.clientY, scroll: document.getElementById('editorViewport').scrollTop }));
+  });
+  const count = () => page.locator('#maskList .mask-chip').count();
+  const fit = async () => {
+    assert.equal(await page.locator('#editorZoom').inputValue(), 'fit');
+    await page.waitForFunction(() => {
+      const canvas = document.getElementById('editorCanvas').getBoundingClientRect(), viewport = document.getElementById('editorViewport').getBoundingClientRect();
+      return canvas.top >= viewport.top && canvas.bottom <= viewport.bottom && canvas.left >= viewport.left && canvas.right <= viewport.right;
+    });
+    assert.equal(await page.locator('#editorScrollbar').isVisible(), false);
+    return page.locator('#editorCanvas').evaluate(canvas => ({ width: canvas.width, height: canvas.height }));
+  };
+  const initialFit = await fit();
+  pass('default view contains the entire long image, including the bottom');
+  await page.locator('#editorZoom').selectOption('1');
+  assert.equal(await page.locator('#editorScrollbar').isVisible(), true);
+  const view = await page.locator('#editorViewport').boundingBox();
+  const point = (id, x, y) => ({ id, x, y });
+  const before = await count();
+  const thumb = await page.locator('#editorScrollThumb').boundingBox(), bar = await page.locator('#editorScrollbar').boundingBox();
+  await page.mouse.move(thumb.x + thumb.width / 2, thumb.y + thumb.height / 2); await page.mouse.down();
+  for (let step = 1; step <= 10; step++) {
+    await page.mouse.move(bar.x + bar.width / 2, thumb.y + thumb.height / 2 + (bar.y + bar.height + 30 - thumb.y - thumb.height / 2) * step / 10);
+    await page.waitForTimeout(25);
+  }
+  await page.mouse.up(); await page.waitForTimeout(50);
+  const bottom = await page.locator('#editorViewport').evaluate(el => ({ top: el.scrollTop, maximum: el.scrollHeight - el.clientHeight }));
+  assert.ok(Math.abs(bottom.top - bottom.maximum) < 2, JSON.stringify({ bottom, thumb, bar, events: await page.evaluate(() => window.scrollbarEvents), drag: await page.evaluate(() => window.dragEvents.slice(-25)) }));
+  const bounds = await page.locator('#editorCanvas').boundingBox();
+  assert.ok(bounds.y + bounds.height <= view.y + view.height + 1);
+  assert.equal(await count(), before);
+  if (variant === 'chrome') await page.locator('#editor').screenshot({ path: path.join(outputs, `${scope === 'live' ? '线上验证' : '本地预览'}-检查页放大及滑动条.png`) });
+  pass('dragging the visible scrollbar reaches the actual image bottom without drawing');
+  await page.locator('#editorScrollbar').focus(); await page.keyboard.press('Home');
+  assert.equal(await page.locator('#editorViewport').evaluate(el => el.scrollTop), 0);
+  const client = variant === 'chrome' ? await context.newCDPSession(page) : null;
+  let previous = [];
+  const touches = async (type, points) => {
+    if (client) {
+      // CDP's touchEnd points name the fingers to lift; this helper accepts the fingers still down.
+      const changed = type === 'touchEnd' && points.length ? previous.filter(old => !points.some(next => next.id === old.id)) : points;
+      await client.send('Input.dispatchTouchEvent', { type, touchPoints: changed.map(p => ({ ...p, radiusX: 5, radiusY: 5, force: 1 })) });
+    } else {
+      await page.evaluate(({ type, points, previous }) => {
+        const dispatch = (eventType, p, target) => target.dispatchEvent(new PointerEvent(eventType, { bubbles: true, cancelable: true, pointerType: 'touch', pointerId: p.id, isPrimary: p.id === 31, clientX: p.x, clientY: p.y, button: 0, buttons: eventType === 'pointerup' || eventType === 'pointercancel' ? 0 : 1 }));
+        const canvas = document.getElementById('editorCanvas'), viewport = document.getElementById('editorViewport');
+        if (type === 'touchStart') for (const p of points) if (!previous.some(old => old.id === p.id)) dispatch('pointerdown', p, canvas);
+        if (type === 'touchMove') for (const p of points) dispatch('pointermove', p, viewport);
+        if (type === 'touchEnd' || type === 'touchCancel') for (const p of previous) if (!points.some(next => next.id === p.id)) dispatch(type === 'touchCancel' ? 'pointercancel' : 'pointerup', p, viewport);
+      }, { type, points, previous });
+    }
+    previous = points.map(p => ({ ...p }));
+    await page.waitForTimeout(25);
+  };
+  const x = view.x + view.width * .4, y = view.y + view.height * .65;
+  await touches('touchStart', [point(31, x, y)]);
+  await touches('touchMove', [point(31, x + 15, y - 12)]);
+  await touches('touchStart', [point(31, x + 15, y - 12), point(32, x + 70, y - 12)]);
+  await touches('touchMove', [point(31, x + 15, y - 92), point(32, x + 70, y - 92)]);
+  await touches('touchEnd', [point(32, x + 70, y - 92)]);
+  const afterBoth = await page.locator('#editorViewport').evaluate(el => el.scrollTop);
+  await touches('touchMove', [point(32, x + 70, y - 142)]);
+  await touches('touchEnd', []);
+  assert.ok(afterBoth > 60);
+  assert.ok(await page.locator('#editorViewport').evaluate(el => el.scrollTop) > afterBoth + 35, JSON.stringify({ afterBoth, events: await page.evaluate(() => window.editorEvents) }));
+  assert.equal(await count(), before);
+  pass('two fingers cancel a draft and pan; lifting one finger cannot add a mask');
+  await page.locator('#browseMode').click();
+  await touches('touchStart', [point(31, x, y)]); await touches('touchMove', [point(31, x, y - 90)]); await touches('touchEnd', []);
+  assert.ok(await page.locator('#editorViewport').evaluate(el => el.scrollTop) > 70);
+  assert.equal(await count(), before);
+  pass('move mode supports single-finger panning');
+  await page.locator('#editorZoom').selectOption('2'); await page.locator('#drawMode').click();
+  await touches('touchStart', [point(31, x + 15, y), point(32, x + 90, y)]);
+  await touches('touchMove', [point(31, x - 45, y - 70), point(32, x + 30, y - 70)]); await touches('touchEnd', []);
+  assert.ok(await page.locator('#editorViewport').evaluate(el => el.scrollLeft) > 45);
+  assert.ok(await page.locator('#editorViewport').evaluate(el => el.scrollTop) > 55);
+  assert.equal(await count(), before);
+  pass('two-finger panning works in both directions when zoomed');
+  await page.locator('#editorZoom').selectOption('fit');
+  const draw = async (startX, startY, width, height) => {
+    const box = await page.locator('#editorCanvas').boundingBox(), ratio = box.width / 1206;
+    await touches('touchStart', [point(31, box.x + startX * ratio, box.y + startY * ratio)]);
+    await touches('touchMove', [point(31, box.x + (startX + width) * ratio, box.y + (startY + height) * ratio)]);
+    await touches('touchEnd', []);
+  };
+  await draw(90, 1500, 600, 180); await draw(90, 2000, 600, 180);
+  assert.equal(await count(), before + 2);
+  const masks = await page.evaluate(async () => (await import('./app.js')).state.items[1].masks.filter(mask => mask.kind === 'manual'));
+  assert.ok(Math.abs(masks[1].y - 2000) < 12);
+  const wrappedFit = await fit(); assert.ok(wrappedFit.height <= initialFit.height);
+  if (variant === 'chrome') await page.locator('#editor').screenshot({ path: path.join(outputs, `${scope === 'live' ? '线上验证' : '本地预览'}-检查页默认整图.png`) });
+  pass('single-finger selections use image coordinates; whole-image fit adapts to wrapping chips');
+  const canvas = await page.locator('#editorCanvas').boundingBox();
+  await touches('touchStart', [point(31, canvas.x + 10, canvas.y + 20)]);
+  await touches('touchMove', [point(31, canvas.x + 50, canvas.y + 60)]);
+  await touches('touchCancel', []);
+  assert.equal(await count(), before + 2);
+  for (const size of [{ width: 320, height: 740 }, { width: 852, height: 393 }, { width: 393, height: 852 }]) {
+    await page.setViewportSize(size); await fit();
+  }
+  pass('canceled gestures add no masks; portrait and landscape layouts retain the full image');
+  await page.locator('#closeEditor').click();
+  await page.waitForFunction(() => document.getElementById('editorCanvas').width === 1);
+  await page.waitForTimeout(50); await wait();
+  assert.equal(await page.locator('body').evaluate(el => el.classList.contains('editor-page-locked')), false);
+  assert.ok(Math.abs(await page.evaluate(() => scrollY) - savedPageScroll) < 2, 'restore the background page after closing inspection: ' + JSON.stringify({ savedPageScroll, current: await page.evaluate(() => ({ top: scrollY, maximum: document.documentElement.scrollHeight - innerHeight })) }));
+  await page.evaluate(() => { Object.defineProperty(navigator, 'canShare', { configurable: true, value: () => false }); });
+  const pendingDownload = page.waitForEvent('download');
+  await page.locator('[data-result="0"] [data-result-action="save"]').click();
+  const download = await pendingDownload, target = path.join(qa, `editor-gestures-${scope}-${variant}.png`);
+  await download.saveAs(target);
+  const metadata = await sharp(target).metadata(); assert.equal(metadata.width, 2412); assert.equal(metadata.height, 2622);
+  assert.deepEqual(errors, []);
+  pass('reviewed masks export to a complete full-resolution PNG without browser errors');
+  await fs.writeFile(path.join(qa, `editor-gestures-${scope}-${variant}.json`), JSON.stringify({ scope, variant, passes, initialFit, wrappedFit, scrollbarBottom: bottom, savedPageScroll, restoredPageScroll: await page.evaluate(() => scrollY), masks, exportedSize: [metadata.width, metadata.height], errors, touchVerification: client ? 'trusted Chrome CDP touch events' : 'synthetic WebKit PointerEvents plus trusted mouse scrollbar drag', physicalIPhoneTested: false }, null, 2));
+})().catch(error => { console.error(error); process.exitCode = 1; }).finally(async () => { await browser?.close(); server?.close(); });
