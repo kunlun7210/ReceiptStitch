@@ -48,9 +48,9 @@
       <summary><div class="settings-label"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4v16M12 4v16M19 4v16"/><path class="knobs" d="M2 8h6M9 15h6M16 10h6"/></svg><span>水印设置<small id="settingsSummary">50 pt · 透明度 70% · 浅灰 · 平铺</small></span></div><span class="chevron">⌄</span></summary>
       <div class="settings-content">
         <label class="field full">水印文字<textarea id="watermarkText" rows="2" maxlength="120">机器/收款码办理 详询VX：kunlun7210</textarea></label>
-        <label class="field full">字号 <output id="fontSizeValue">50 pt</output><input type="range" id="fontSize" min="20" max="120" step="1" value="50" aria-label="水印字号"></label>
-        <div class="field full"><div class="color-title">文字颜色<span id="colorLabel">浅灰</span></div><div id="colorPalette" class="color-palette" role="group" aria-label="水印文字颜色"></div></div>
+        <div class="field full"><div class="color-title">颜色<span id="colorLabel">浅灰</span></div><div id="commonColors" class="common-colors" role="group" aria-label="常用水印颜色"></div></div>
         <label class="field full">透明度 <output id="transparencyValue">70%</output><input type="range" id="transparency" min="0" max="95" step="1" value="70"><small>数值越高，水印越浅；始终斜向平铺。</small></label>
+        <label class="field full">字号 <output id="fontSizeValue">50 pt</output><input type="range" id="fontSize" min="20" max="120" step="1" value="50" aria-label="水印字号"></label>
         <button class="text-button reset-settings" id="resetSettings">恢复默认水印</button>
       </div>
     </details>
@@ -65,6 +65,10 @@
   </main>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
+  <dialog id="colorDialog" class="help-dialog color-dialog" aria-labelledby="colorDialogTitle">
+    <div class="dialog-heading"><h2 id="colorDialogTitle">字体颜色</h2><button id="closeColorPalette" class="text-button">确定</button></div>
+    <div id="colorPalette" class="color-palette" role="group" aria-label="更多水印颜色"></div>
+  </dialog>
   <dialog id="editor" class="editor-dialog">
     <div class="editor-top"><div><h2 id="editorTitle">检查遮挡</h2><p id="editorSubtitle">拖动框选可补充马赛克</p></div><button id="closeEditor" class="primary compact">完成检查</button></div>
     <div class="editor-tools"><button id="drawMode" class="tool active" aria-pressed="true">框选遮挡</button><button id="browseMode" class="tool" aria-pressed="false">移动查看</button><button id="undoMask" class="tool">撤销补框</button><label class="zoom-label">缩放 <select id="editorZoom"><option value="1">1×</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="3">3×</option></select></label></div>

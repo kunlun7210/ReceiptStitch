@@ -37,13 +37,15 @@ let context, server;
   assert.ok(draggedSize > 50);
   assert.equal(await page.locator('#fontSizeValue').innerText(),`${draggedSize} pt`);
   await page.locator('#resetSettings').click();
+  await page.locator('#openColorPalette').click();
   await page.getByRole('button',{name:'浅红',exact:true}).click();
   assert.equal(await page.locator('#colorLabel').innerText(),'浅红');
   assert.equal(await page.getByRole('button',{name:'浅红',exact:true}).getAttribute('aria-pressed'),'true');
-  await page.getByRole('button',{name:'浅灰',exact:true}).click();
+  await page.locator('#closeColorPalette').click();
+  await page.locator('#commonColors').getByRole('button',{name:'浅灰',exact:true}).click();
   await page.locator('#settings').screenshot({path:path.join(dest,`palette-${variant}.png`)});
   await page.locator('#settings').evaluate(el=>el.open=false);
-  pass('首页文案已替换，30 色固定色板可选择，无色号输入和系统颜色器');
+  pass('首页文案已替换，常用颜色和二级固定色板可选择，无色号输入和系统颜色器');
   const wait = async count => {
     await page.waitForFunction(async count=>{const {state}=await import('./app.js');return state.items.length===count&&!state.busy},count,{timeout:180000});
     await page.evaluate(async()=>{const {state}=await import('./app.js');await state.pending;await state.pendingRender});

@@ -1,14 +1,16 @@
-import { DEFAULTS, PALETTE, detectSensitive, paintMasks, composePair, makeThumbnail } from './processing.js';
+import { DEFAULTS, COMMON_COLORS, PALETTE, detectSensitive, paintMasks, composePair, makeThumbnail } from './processing.js';
 import { scanImage, prepareOCR } from './ocr.js';
 
 const $ = id => document.getElementById(id);
 export const state = { items: [], results: [], busy: false, settings: { ...DEFAULTS }, sequence: 0, revision: 0, pending: Promise.resolve() };
 let toastTimer, renderTimer, rendering = Promise.resolve(), editing = null, drawing = null, drawEnabled = true;
 const labels = { card: '卡尾号', balance: '可用余额 / 额度', manual: '手动遮挡' };
+const colorChoices = [...COMMON_COLORS, ...PALETTE];
+const colorName = color => colorChoices.find(([value]) => value === color)?.[1] || '浅灰';
 
 try {
   const saved = JSON.parse(localStorage.getItem('receipt-stitch-settings') || 'null');
-  if (saved && typeof saved.text === 'string' && PALETTE.some(([color]) => color === saved.color)) state.settings = {
+  if (saved && typeof saved.text === 'string' && colorChoices.some(([color]) => color === saved.color)) state.settings = {
     text: saved.text.slice(0, 120), color: saved.color,
     fontSize: Math.min(120, Math.max(20, Number(saved.fontSize) || 50)),
     transparency: Math.min(95, Math.max(0, Number(saved.transparency) || 0)),
@@ -42,10 +44,12 @@ function writeSettings() {
   $('transparencyValue').textContent = `${s.transparency}%`;
   $('fontSizeValue').textContent = `${s.fontSize} pt`;
   renderPalette();
-  $('settingsSummary').textContent = `${s.fontSize} pt · 透明度 ${s.transparency}% · ${PALETTE.find(([color]) => color === s.color)?.[1] || '浅灰'} · 平铺`;
+  $('settingsSummary').textContent = `${s.fontSize} pt · 透明度 ${s.transparency}% · ${colorName(s.color)} · 平铺`;
 }
 function renderPalette() {
-  $('colorLabel').textContent = PALETTE.find(([color]) => color === state.settings.color)?.[1] || '浅灰';
+  $('colorLabel').textContent = colorName(state.settings.color);
+  const custom = !COMMON_COLORS.some(([color]) => color === state.settings.color);
+  $('commonColors').innerHTML = COMMON_COLORS.map(([color,name]) => `<button type="button" class="color-choice" data-color="${color}" aria-label="${name}" aria-pressed="${color === state.settings.color}"><span style="background:${color}">${color === state.settings.color ? '✓' : ''}</span></button>`).join('') + `<button type="button" id="openColorPalette" class="color-choice palette-trigger" aria-label="调色盘，更多颜色" aria-haspopup="dialog" aria-controls="colorDialog" aria-expanded="${$('colorDialog').open}" aria-pressed="${custom}"><span class="palette-wheel" style="--selected-color:${custom ? state.settings.color : '#ffffff'}"></span></button>`;
   $('colorPalette').innerHTML = PALETTE.map(([color,name]) => `<button type="button" class="color-choice" data-color="${color}" aria-label="${name}" aria-pressed="${color === state.settings.color}"><span style="background:${color}">${color === state.settings.color ? '✓' : ''}</span></button>`).join('');
 }
 function readSettings() {
@@ -53,12 +57,19 @@ function readSettings() {
   try { localStorage.setItem('receipt-stitch-settings', JSON.stringify(state.settings)); } catch {}
   $('transparencyValue').textContent = `${state.settings.transparency}%`;
   $('fontSizeValue').textContent = `${state.settings.fontSize} pt`;
-  $('colorLabel').textContent = PALETTE.find(([color]) => color === state.settings.color)?.[1] || '浅灰';
+  $('colorLabel').textContent = colorName(state.settings.color);
   $('settingsSummary').textContent = `${state.settings.fontSize} pt · 透明度 ${state.settings.transparency}% · ${$('colorLabel').textContent} · 平铺`;
   invalidateResults();
 }
 for (const id of ['watermarkText','fontSize','transparency']) $(id).addEventListener('input', readSettings);
 $('colorPalette').addEventListener('click', event => { const button = event.target.closest('[data-color]'); if (!button) return; state.settings.color = button.dataset.color; renderPalette(); readSettings(); });
+$('commonColors').addEventListener('click', event => {
+  const button = event.target.closest('[data-color]');
+  if (button) { state.settings.color = button.dataset.color; renderPalette(); readSettings(); }
+  else if (event.target.closest('#openColorPalette')) { $('colorDialog').showModal(); $('openColorPalette').setAttribute('aria-expanded','true'); }
+});
+$('closeColorPalette').addEventListener('click', () => $('colorDialog').close());
+$('colorDialog').addEventListener('close', () => $('openColorPalette').setAttribute('aria-expanded','false'));
 $('fontSize').addEventListener('change', () => $('fontSize').value = state.settings.fontSize);
 $('resetSettings').addEventListener('click', () => { state.settings = { ...DEFAULTS }; writeSettings(); readSettings(); });
 

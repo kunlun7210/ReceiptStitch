@@ -1,4 +1,7 @@
 export const DEFAULTS = Object.freeze({ text: '机器/收款码办理 详询VX：kunlun7210', fontSize: 50, transparency: 70, color: '#b3b3b3' });
+export const COMMON_COLORS = Object.freeze([
+  ['#ff0000','红色'], ['#000000','黑色'], ['#0055ff','蓝色'], ['#b3b3b3','浅灰'],
+]);
 export const PALETTE = Object.freeze([
   ['#376b20','深绿'],['#fa8210','橙色'],['#e85b00','深橙'],['#b9191c','深红'],['#442923','深棕'],['#141414','黑色'],
   ['#6ca236','草绿'],['#ffc42d','金黄'],['#ff8500','橙黄'],['#d92a2e','红色'],['#66483c','棕色'],['#666666','深灰'],
