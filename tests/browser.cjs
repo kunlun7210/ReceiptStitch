@@ -12,7 +12,7 @@ let context, server;
   const prefix = process.env.TEST_PREFIX || '/';
   server = require('../scripts/serve.cjs')({basePath:prefix});
   if (process.env.VERIFY_DOWNLOAD_PROGRESS === '1') server.prependListener('request',(req,res) => {
-    if (!req.url.includes('/ocr/runtime-v1/assets/worker-entry-')) return;
+    if (!req.url.includes('/ocr/transport-v1/')) return;
     const end = res.end.bind(res);
     res.end = bytes => {
       let offset = 0, timer;
@@ -33,7 +33,7 @@ let context, server;
   const pass = name => { passes.push(name); console.log('PASS',name); };
   page.on('pageerror',error=>errors.push(error.stack || error.message));
   page.on('request',request=>requests.push({url:request.url(),method:request.method()}));
-  await page.goto(base);
+  await page.goto(base + '?source=origin');
   await page.evaluate(()=>navigator.serviceWorker.ready);
   // Fresh shell after a service worker update, without losing downloaded models.
   await page.evaluate(async()=>{const r=await navigator.serviceWorker.getRegistration();await r.update();});
@@ -132,8 +132,11 @@ let context, server;
     s.clearRect(0,0,1206,2622);s.drawImage(state.items[1].image,0,0);
     // Transaction amount ROI, separated from the available balance below it.
     const p=g.getImageData(1206+400,920,660,75).data,q=s.getImageData(400,920,660,75).data;let amountDiff=0;for(let i=0;i<p.length;i++)if(p[i]!==q[i])amountDiff++;
-    const {paintMasks}=await import('./processing.js');const red=document.createElement('canvas');red.width=100;red.height=100;const rg=red.getContext('2d');rg.fillStyle='red';rg.fillRect(0,0,100,100);const mask={x:10,y:10,width:70,height:40};paintMasks(rg,[mask]);const before=rg.getImageData(10,10,70,40).data;rg.fillStyle='blue';rg.fillRect(0,0,100,100);paintMasks(rg,[mask]);const after=rg.getImageData(10,10,70,40).data;return{leftDiff,amountDiff,independent:before.every((v,i)=>v===after[i])};
+    const {paintMasks}=await import('./processing.js');const red=document.createElement('canvas');red.width=100;red.height=100;const rg=red.getContext('2d');rg.fillStyle='red';rg.fillRect(0,0,100,100);const mask={x:10,y:10,width:70,height:40};paintMasks(rg,[mask]);const before=rg.getImageData(10,10,70,40).data;rg.fillStyle='blue';rg.fillRect(0,0,100,100);paintMasks(rg,[mask]);const after=rg.getImageData(10,10,70,40).data;return{leftDiff,amountDiff,independent:before.every((v,i)=>v===after[i]),outputFirst:[...a.slice(0,16)],sourceFirst:[...b.slice(0,16)],imageSize:[img.naturalWidth,img.naturalHeight],lost:g.isContextLost?.()};
   });
+  await fs.writeFile(path.join(dest,`pixel-check-${variant}.json`),JSON.stringify(pixelCheck,null,2));
+  const unmarked=await page.evaluate(async()=>{const{state}=await import('./app.js');const a=new Uint8Array(await state.results[0].blob.arrayBuffer());let s='';for(let i=0;i<a.length;i+=32768)s+=String.fromCharCode(...a.subarray(i,i+32768));return btoa(s)});
+  await fs.writeFile(path.join(dest,`unmarked-${variant}.png`),Buffer.from(unmarked,'base64'));
   assert.equal(pixelCheck.leftDiff,0);assert.equal(pixelCheck.amountDiff,0);assert.equal(pixelCheck.independent,true);
   pass('无水印时左图和交易金额逐像素保留；马赛克像素不携带原文信息');
   await page.locator('#fontSize').fill('60');await page.locator('#transparency').fill('80');

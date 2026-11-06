@@ -1,9 +1,10 @@
 import { DEFAULTS, COMMON_COLORS, PALETTE, detectSensitive, paintMasks, composePair, makeThumbnail } from './processing.js';
-import { scanImage, prepareOCR } from './ocr.js';
+import { scanImage, prepareOCR, ocrCacheStatus } from './ocr.js';
 
 const $ = id => document.getElementById(id);
-export const state = { items: [], results: [], busy: false, settings: { ...DEFAULTS }, sequence: 0, revision: 0, pending: Promise.resolve() };
-let toastTimer, renderTimer, rendering = Promise.resolve(), editing = null, drawing = null, drawEnabled = true;
+export const state = { items: [], results: [], busy: false, settings: { ...DEFAULTS }, stitchDirection: 'horizontal', manualMaskStyle: 'mosaic', sequence: 0, revision: 0, pending: Promise.resolve() };
+let toastTimer, renderTimer, rendering = Promise.resolve(), editing = null, drawing = null, drawEnabled = true, editingStyle = 'mosaic';
+let modelPreparation = null, modelPhase = 'idle';
 const labels = { card: '卡尾号', balance: '可用余额 / 额度', manual: '手动遮挡' };
 const colorChoices = [...COMMON_COLORS, ...PALETTE];
 const colorName = color => colorChoices.find(([value]) => value === color)?.[1] || '浅灰';
@@ -16,7 +17,10 @@ try {
     transparency: Math.min(95, Math.max(0, Number(saved.transparency) || 0)),
   };
 } catch {}
+try { if (localStorage.getItem('receipt-stitch-layout') === 'vertical') state.stitchDirection = 'vertical'; } catch {}
+try { const style = localStorage.getItem('receipt-stitch-mask-style'); if (['mosaic','solid','smear'].includes(style)) state.manualMaskStyle = style; } catch {}
 writeSettings();
+writeStitchSettings();
 
 if ('serviceWorker' in navigator) {
   const alreadyControlled = Boolean(navigator.serviceWorker.controller);
@@ -81,6 +85,22 @@ $('colorDialog').addEventListener('close', () => $('openColorPalette').setAttrib
 $('fontSize').addEventListener('change', () => $('fontSize').value = state.settings.fontSize);
 $('resetSettings').addEventListener('click', () => { state.settings = { ...DEFAULTS }; writeSettings(); readSettings(); });
 
+function writeStitchSettings() {
+  const vertical = state.stitchDirection === 'vertical';
+  document.querySelector(`input[name="stitchDirection"][value="${state.stitchDirection}"]`).checked = true;
+  $('stitchSummary').textContent = vertical ? '竖向拼接 · 第一张在上' : '横向拼接 · 第一张在左';
+  $('stitchStep').textContent = '拼接';
+  $('uploadOrderHint').textContent = `每 2 张一组，按选择顺序${vertical ? '上下' : '左右'}排列`;
+  $('photoOrderHint').textContent = `相邻两张为一组，${vertical ? '上下' : '左右'}排列，可调整顺序`;
+  $('stitchHint').textContent = `两张照片按同${vertical ? '宽' : '高'}拼接，保留完整画面。`;
+}
+$('stitchSettings').addEventListener('change', event => {
+  if (event.target.name !== 'stitchDirection') return;
+  state.stitchDirection = event.target.value === 'vertical' ? 'vertical' : 'horizontal';
+  try { localStorage.setItem('receipt-stitch-layout', state.stitchDirection); } catch {}
+  writeStitchSettings(); invalidateResults(0);
+});
+
 function chooseFiles() { $('fileInput').click(); }
 $('chooseButton').addEventListener('click', chooseFiles); $('addMoreButton').addEventListener('click', chooseFiles);
 $('fileInput').addEventListener('change', event => { const files = Array.from(event.target.files); event.target.value = ''; state.pending = importFiles(files); });
@@ -126,6 +146,7 @@ async function analyzePending() {
     try {
       status(`正在识别 ${completed + 1} / ${targets.length}`, item.name);
       const lines = await scanImage(item.image, (message, info) => {
+        if (info?.phase !== 'recognizing') showModelPreparation(message, info);
         if (info?.phase === 'recognizing') {
           status(`正在识别 ${completed + 1} / ${targets.length}`, item.name);
           $('progress').setAttribute('aria-label','图片识别进度');
@@ -143,6 +164,7 @@ async function analyzePending() {
       item.masks = [...automatic, ...item.masks.filter(m => m.source === 'manual')];
       item.status = 'ready'; updateOfflineStatus();
     } catch (error) {
+      if (modelPhase !== 'ready') showModelError(error);
       item.status = 'error'; item.error = /下载|联网|读取|校验|HTTPS/.test(error.message) ? error.message : '本地识别暂未完成，请重试。';
       status('自动识别未完成', `${item.error} 可重试，或逐张手动框选后完成检查。`, true);
       // Initialization failures should not trigger repeated downloads for every photo.
@@ -206,13 +228,14 @@ async function renderResults(revision) {
   $('pairHint').textContent = `最后 1 张还没有配对。再添加 1 张，即可生成第 ${pairs + 1} 组。`;
   const next = [];
   const settings = { ...state.settings };
+  const direction = state.stitchDirection, vertical = direction === 'vertical';
   for (let i = 0; i < pairs; i++) {
     if (revision !== state.revision) { next.forEach(freeResult); return; }
     const left = state.items[i * 2], right = state.items[i * 2 + 1];
     const usable = [left, right].every(item => item.status === 'ready' || item.status === 'error' && item.reviewed);
     if (!usable) { next.push({ left, right, index: i, error: [left,right].some(item => item.status === 'error') ? '识别未完成，请重试或手动检查两张照片。' : '正在识别照片，完成后自动生成…' }); continue; }
     try {
-      const output = await composePair(left, right, settings);
+      const output = await composePair(left, right, settings, direction);
       next.push({ ...output, left, right, index: i, url: URL.createObjectURL(output.blob), file: new File([output.blob], `${String(i + 1).padStart(2,'0')}-收款拼图.png`, { type: 'image/png' }) });
     } catch (error) { next.push({ left, right, index:i, error: error.message }); }
   }
@@ -222,9 +245,9 @@ async function renderResults(revision) {
     const masks = [...result.left.masks, ...result.right.masks];
     const cards = masks.filter(m => m.kind === 'card').length, balances = masks.filter(m => m.kind === 'balance').length, manuals = masks.filter(m => m.kind === 'manual').length;
     const description = result.error ? '请先完成识别或手动检查' : masks.length ? [cards ? `尾号 ${cards} 处` : '', balances ? `余额 / 额度 ${balances} 处` : '', manuals ? `补框 ${manuals} 处` : ''].filter(Boolean).join(' · ') : '未发现目标字段，可点照片检查或补框';
-    return `<article class="result-card" data-result="${result.index}"><div class="result-heading"><h3>第 ${result.index + 1} 组 <span>${result.index * 2 + 1} + ${result.index * 2 + 2}</span></h3><button data-result-action="swap" ${state.busy ? 'disabled' : ''}>⇄ 交换左右</button></div>
-      <button class="result-preview" data-result-action="preview" aria-label="放大查看第 ${result.index + 1} 组结果">${result.url ? `<img src="${result.url}" alt="第 ${result.index + 1} 组：已遮挡敏感信息、横向拼接并添加水印"><span class="preview-zoom">⊕</span>` : `<span class="generating">${escapeHTML(result.error)}</span>`}</button>
-      <div class="result-info"><p class="mask-summary${!masks.length || result.error ? ' warn' : ''}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2l6 2v5c0 4-6 8-6 8S4 13 4 9V4l6-2Z"/><path d="m7 9 2 2 4-4"/></svg>${description}</p><div class="result-actions"><button class="secondary" data-result-action="left">检查左图</button><button class="secondary" data-result-action="right">检查右图</button><button class="primary compact" data-result-action="save" ${result.url ? '' : 'disabled'}>保存图片</button></div>${result.url ? `<p class="result-detail">${result.width} × ${result.height} · PNG${result.resized ? ' · 已适配手机导出尺寸' : ' · 完整画面'}</p>` : ''}</div></article>`;
+    return `<article class="result-card" data-result="${result.index}"><div class="result-heading"><h3>第 ${result.index + 1} 组 <span>${result.index * 2 + 1} + ${result.index * 2 + 2}</span></h3><button data-result-action="swap" ${state.busy ? 'disabled' : ''}>${vertical ? '⇅ 交换上下' : '⇄ 交换左右'}</button></div>
+      <button class="result-preview" data-result-action="preview" aria-label="放大查看第 ${result.index + 1} 组结果">${result.url ? `<img src="${result.url}" alt="第 ${result.index + 1} 组：已遮挡敏感信息、${vertical ? '竖向' : '横向'}拼接并添加水印"><span class="preview-zoom">⊕</span>` : `<span class="generating">${escapeHTML(result.error)}</span>`}</button>
+      <div class="result-info"><p class="mask-summary${!masks.length || result.error ? ' warn' : ''}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2l6 2v5c0 4-6 8-6 8S4 13 4 9V4l6-2Z"/><path d="m7 9 2 2 4-4"/></svg>${description}</p><div class="result-actions"><button class="secondary" data-result-action="left">检查${vertical ? '上' : '左'}图</button><button class="secondary" data-result-action="right">检查${vertical ? '下' : '右'}图</button><button class="primary compact" data-result-action="save" ${result.url ? '' : 'disabled'}>保存图片</button></div>${result.url ? `<p class="result-detail">${result.width} × ${result.height} · PNG${result.resized ? ' · 已适配手机导出尺寸' : ' · 完整画面'}</p>` : ''}</div></article>`;
   }).join('');
   $('saveAllButton').disabled = next.length === 0 || next.some(result => !result.file) || state.busy;
 }
@@ -256,6 +279,9 @@ $('saveAllButton').addEventListener('click', () => { const valid = state.results
 function openEditor(item) {
   if (!item) return;
   editing = item; drawing = null; $('editorZoom').value = '1'; setDrawMode(true);
+  const previous = item.masks.filter(mask => mask.kind === 'manual').at(-1);
+  editingStyle = previous ? previous.style || 'mosaic' : state.manualMaskStyle;
+  writeMaskStyle();
   $('editorTitle').textContent = `检查第 ${state.items.indexOf(item) + 1} 张`;
   $('editorSubtitle').textContent = item.name;
   $('editor').showModal(); redrawEditor();
@@ -263,6 +289,20 @@ function openEditor(item) {
 function setDrawMode(enabled) { drawEnabled = enabled; $('drawMode').classList.toggle('active', enabled); $('browseMode').classList.toggle('active', !enabled); $('drawMode').setAttribute('aria-pressed', String(enabled)); $('browseMode').setAttribute('aria-pressed', String(!enabled)); $('editorViewport').classList.toggle('browse', !enabled); }
 $('drawMode').addEventListener('click', () => setDrawMode(true)); $('browseMode').addEventListener('click', () => setDrawMode(false));
 $('editorZoom').addEventListener('change', redrawEditor);
+function writeMaskStyle() {
+  for (const button of $('maskStyleOptions').querySelectorAll('[data-mask-style]')) {
+    const active = button.dataset.maskStyle === editingStyle;
+    button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active));
+  }
+}
+$('maskStyleOptions').addEventListener('click', event => {
+  const button = event.target.closest('[data-mask-style]');
+  if (!button || !editing || !['mosaic','solid','smear'].includes(button.dataset.maskStyle)) return;
+  editingStyle = state.manualMaskStyle = button.dataset.maskStyle;
+  try { localStorage.setItem('receipt-stitch-mask-style', editingStyle); } catch {}
+  for (const mask of editing.masks) if (mask.kind === 'manual') mask.style = editingStyle;
+  editing.manualRevision++; writeMaskStyle(); redrawEditor();
+});
 function redrawEditor() {
   if (!editing) return;
   const canvas = $('editorCanvas'), viewport = $('editorViewport');
@@ -284,7 +324,7 @@ $('editorCanvas').addEventListener('pointermove', event => { if (!drawing) retur
 $('editorCanvas').addEventListener('pointerup', event => {
   if (!drawing) return;
   const point = editorPoint(event), x = Math.min(drawing.x, point.x), y = Math.min(drawing.y, point.y), width = Math.abs(point.x - drawing.x), height = Math.abs(point.y - drawing.y);
-  if (width >= 7 && height >= 7) { editing.masks.push({ x:Math.floor(x), y:Math.floor(y), width:Math.ceil(width), height:Math.ceil(height), kind:'manual', source:'manual' }); editing.manualRevision++; }
+  if (width >= 7 && height >= 7) { editing.masks.push({ x:Math.floor(x), y:Math.floor(y), width:Math.ceil(width), height:Math.ceil(height), kind:'manual', source:'manual', style:editingStyle }); editing.manualRevision++; }
   drawing = null; redrawEditor();
 });
 $('editorCanvas').addEventListener('pointercancel', () => { drawing = null; redrawEditor(); });
@@ -294,10 +334,64 @@ $('closeEditor').addEventListener('click', () => { if (editing) editing.reviewed
 $('editor').addEventListener('close', async () => { const item = editing; editing = null; drawing = null; if (!item) return; await refreshThumbnail(item); renderPhotos(); invalidateResults(0); $('editorCanvas').width = $('editorCanvas').height = 1; });
 window.addEventListener('resize', () => { if (editing) redrawEditor(); });
 $('helpButton').addEventListener('click', () => $('helpDialog').showModal()); $('closeHelp').addEventListener('click', () => $('helpDialog').close());
-$('prepareButton').addEventListener('click', async () => {
-  $('prepareButton').disabled = true;
-  try { await prepareOCR(message => $('prepareStatus').textContent = message); updateOfflineStatus(); $('prepareStatus').textContent = '准备完成，可以离线识别了。'; }
-  catch (error) { $('prepareStatus').textContent = error.message; }
-  finally { $('prepareButton').disabled = false; }
-});
+function updateModelButtons() {
+  const disabled = ['loading', 'ready', 'unsupported'].includes(modelPhase);
+  const text = modelPhase === 'ready' ? '模型已下载' : modelPhase === 'loading' ? '正在准备识别模型…' : modelPhase === 'error' ? '重试下载模型' : '提前下载识别模型';
+  for (const id of ['downloadModelButton', 'prepareButton']) { $(id).disabled = disabled; $(id).textContent = text; }
+  $('modelCacheTag').textContent = ({ ready: '已缓存', loading: '下载中', error: '未完成', unsupported: '不可用' })[modelPhase] || '未缓存';
+  $('modelCacheTag').dataset.state = modelPhase;
+}
+function markModelsReady() {
+  modelPhase = 'ready'; updateModelButtons(); updateOfflineStatus();
+  $('modelDownloadState').textContent = '已下载 · 可离线使用';
+  $('modelDownloadSource').textContent = $('prepareSource').textContent = '使用本机缓存';
+  $('modelDownloadStatus').textContent = $('prepareStatus').textContent = '模型已保存在本机，选择照片即可识别。';
+  for (const id of ['modelDownloadProgress', 'prepareProgress']) $(id).hidden = true;
+}
+function showModelPreparation(message, info) {
+  if (info?.phase === 'ready') { markModelsReady(); return; }
+  modelPhase = 'loading'; updateModelButtons();
+  $('modelDownloadState').textContent = '正在准备本地识别模型';
+  $('modelDownloadStatus').textContent = $('prepareStatus').textContent = message;
+  if (info?.source) $('modelDownloadSource').textContent = $('prepareSource').textContent = `下载源：${info.source}`;
+  for (const id of ['modelDownloadProgress', 'prepareProgress']) {
+    const progress = $(id); progress.hidden = false;
+    if (info?.total) progress.value = info.loaded / info.total;
+    else progress.removeAttribute('value');
+  }
+}
+function showModelError(error) {
+  modelPhase = 'error'; updateModelButtons();
+  $('modelDownloadState').textContent = '尚未准备完成 · 已下载的组件会保留';
+  $('modelDownloadStatus').textContent = $('prepareStatus').textContent = error.message;
+  for (const id of ['modelDownloadProgress', 'prepareProgress']) $(id).hidden = true;
+}
+async function refreshModelCache() {
+  const status = await ocrCacheStatus();
+  if (modelPhase !== 'idle') return;
+  if (status.ready) markModelsReady();
+  else if (!status.supported) {
+    modelPhase = 'unsupported'; updateModelButtons();
+    $('modelDownloadState').textContent = '离线缓存不可用';
+    $('modelDownloadStatus').textContent = '请在 Safari 的 HTTPS 页面中打开后重试。';
+  } else if (status.partial) {
+    $('modelCacheTag').textContent = '部分缓存'; $('modelCacheTag').dataset.state = 'partial';
+    $('modelDownloadState').textContent = '已保存部分组件 · 可继续下载';
+    $('downloadModelButton').textContent = $('prepareButton').textContent = '继续下载识别模型';
+  }
+}
+function downloadModels() {
+  if (modelPreparation) return modelPreparation;
+  if (modelPhase === 'ready') return Promise.resolve();
+  showModelPreparation('正在准备模型，完成后即可选择照片。');
+  modelPreparation = (async () => {
+    try { await prepareOCR(showModelPreparation); markModelsReady(); }
+    catch (error) { showModelError(error); }
+    finally { modelPreparation = null; }
+  })();
+  return modelPreparation;
+}
+$('prepareButton').addEventListener('click', downloadModels);
+$('downloadModelButton').addEventListener('click', downloadModels);
+void refreshModelCache();
 window.addEventListener('online', () => toast('网络已连接。')); window.addEventListener('offline', () => toast('当前离线，已缓存的识别组件仍可使用。'));

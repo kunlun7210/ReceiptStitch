@@ -13,7 +13,7 @@ const samples = process.env.SAMPLE_DIR || path.resolve(__dirname, '../../fixture
     page.on('pageerror',error=>{errors.push(error.message); console.log('PAGE ERROR',error.message)});
     page.on('console',msg=>{if(msg.type()==='error')console.log('CONSOLE',msg.text().slice(0,300))});
     page.on('request',request=>requests.push({url:request.url(),method:request.method()}));
-    await page.goto('http://127.0.0.1:48721/');
+    await page.goto('http://127.0.0.1:48721/?source=origin');
     await page.evaluate(()=>navigator.serviceWorker.ready);
     await page.screenshot({path:path.join(dest,'home-mobile.png'),fullPage:true});
     const names=await fs.readdir(samples);

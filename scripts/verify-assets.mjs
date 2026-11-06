@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 const root = path.resolve('dist');
 const required = ['index.html','app.js','processing.js','ocr.js','styles.css','sw.js','manifest.webmanifest','icon.svg','icon-192.png','icon-512.png','apple-touch-icon.png'];
 for (const file of required) if ((await fs.stat(path.join(root,file))).size === 0) throw new Error(`Empty: ${file}`);
@@ -8,6 +9,10 @@ const manifest = JSON.parse(await fs.readFile(path.join(root,'ocr/manifest.json'
 for (const entry of manifest.files) {
   const bytes = entry.parts ? Buffer.concat(await Promise.all(entry.parts.map(file => fs.readFile(path.join(root,file))))) : await fs.readFile(path.join(root,entry.file));
   if (bytes.length !== entry.bytes || crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error(`Asset mismatch: ${entry.file}`);
+  if (entry.transport) {
+    const compressed = await fs.readFile(path.join(root, entry.transport.file));
+    if (compressed.length !== entry.transport.bytes || crypto.createHash('sha256').update(compressed).digest('hex') !== entry.transport.sha256 || !gunzipSync(compressed).equals(bytes)) throw new Error(`Transport mismatch: ${entry.file}`);
+  }
 }
 const html = await fs.readFile(path.join(root,'index.html'),'utf8');
 if (html.includes('type="color"') || !html.includes('智能隐私拼图')) throw new Error('Requested UI changes missing');
