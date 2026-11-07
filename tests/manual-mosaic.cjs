@@ -3,6 +3,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const sharp = require('sharp');
 const { chromium, webkit } = require('playwright');
+const { groupBySizes } = require('./photo-groups.cjs');
 const variant = process.env.BROWSER || 'chrome';
 const root = path.resolve(__dirname, '..'), outputs = path.resolve(root, '../../outputs');
 let server, browser;
@@ -49,6 +50,7 @@ let server, browser;
   const waitRender = () => page.evaluate(async () => { const { state } = await import('./app.js'); await state.pending; await state.pendingRender; });
   await waitRender();
   assert.deepEqual(await page.evaluate(async () => (await import('./app.js')).state.items.map(item => item.status)), Array(10).fill('ready'));
+  await groupBySizes(page, [2, 2, 2, 2, 2]);
   if (variant === 'chrome') for (let index = 0; index < 5; index++) {
     const b64 = await page.evaluate(async index => {
       const { state } = await import('./app.js'), bytes = new Uint8Array(await state.results[index].blob.arrayBuffer()); let binary = '';
@@ -58,6 +60,7 @@ let server, browser;
   }
   console.log('PASS', variant, 'five automatic results preserved');
   await page.locator('[data-result="0"] [data-result-action="right"]').click();
+  await page.locator('#editorCanvas').waitFor({ state: 'visible' });
   const draw = async (x, y, width, height) => {
     const box = await page.locator('#editorCanvas').boundingBox(), scale = box.width / 1206;
     await page.mouse.move(box.x + x * scale, box.y + y * scale); await page.mouse.down();
@@ -81,8 +84,9 @@ let server, browser;
   await page.locator('#settings').evaluate(el => el.open = true); await page.locator('#watermarkText').fill(''); await page.waitForTimeout(200); await waitRender();
   const density = await page.evaluate(async () => {
     const { state } = await import('./app.js'), r = state.results[0], mask = state.items[1].masks.filter(mask => mask.kind === 'manual').at(-1);
+    const { collageGeometry } = await import('./processing.js');
     const image = new Image(); image.src = r.url; await image.decode(); const c = document.createElement('canvas'); c.width = r.width; c.height = r.height;
-    const g = c.getContext('2d'); g.drawImage(image, 0, 0); const width = Math.floor(mask.width), x = Math.floor(mask.x), y = r.firstHeight + Math.floor(mask.y) + 1;
+    const g = c.getContext('2d'); g.drawImage(image, 0, 0); const width = Math.floor(mask.width), x = Math.floor(mask.x), y = collageGeometry(r.photos, r.layout).panels[1].y + Math.floor(mask.y) + 1;
     const pixels = g.getImageData(x, y, width, 1).data, changes = [];
     for (let col = 1; col < width; col++) if (pixels[col * 4] !== pixels[(col - 1) * 4]) changes.push(col);
     c.width = c.height = 1; return { width, changes };

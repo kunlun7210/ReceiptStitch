@@ -3,6 +3,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { chromium, webkit } = require('playwright');
 const sharp = require('sharp');
+const { groupBySizes } = require('./photo-groups.cjs');
 const root = path.resolve(__dirname, '..');
 const dest = path.resolve(root, '../qa');
 const samples = process.env.SAMPLE_DIR || path.resolve(__dirname, '../../fixtures');
@@ -79,11 +80,13 @@ let context, server;
   });
   await page.locator('#fileInput').setInputFiles(files);
   await wait(10);
+  assert.equal(await page.locator('.result-card').count(), 1);
+  await groupBySizes(page, [2, 2, 2, 2, 2]);
   const detected = await page.evaluate(async()=>{const {state}=await import('./app.js');return state.items.map(item=>({name:item.name,status:item.status,masks:item.masks}));});
   assert.deepEqual(detected.map(i=>i.status),Array(10).fill('ready'));
   assert.deepEqual(detected.map(i=>i.masks.map(m=>m.kind)),[[],['card','balance'],[],['card','balance'],[],['card','balance'],[],['card'],[],['card','balance']]);
   assert.equal(await page.locator('.result-card').count(),5);
-  pass('10 张真实素材生成 5 组，5 处尾号和 4 处余额 / 额度全部识别');
+  pass('10 张真实素材默认拼成一张，也可分成原来的 5 组，9 处目标字段全部识别');
   if (process.env.VERIFY_DOWNLOAD_PROGRESS === '1') {
     const progress = await page.evaluate(()=>window.downloadEvents);
     const partial = [...new Set(progress.filter(e=>e.value>0&&e.value<1).map(e=>e.detail))];
@@ -127,12 +130,15 @@ let context, server;
   await page.waitForTimeout(400);await page.evaluate(async()=>{const {state}=await import('./app.js');await state.pendingRender});
   const pixelCheck=await page.evaluate(async()=>{
     const {state}=await import('./app.js');const r=state.results[0];const img=new Image();img.src=r.url;await img.decode();const c=document.createElement('canvas');c.width=r.width;c.height=r.height;const g=c.getContext('2d',{willReadFrequently:true});g.drawImage(img,0,0);
-    const source=document.createElement('canvas');source.width=1206;source.height=2622;const s=source.getContext('2d',{willReadFrequently:true});s.drawImage(state.items[0].image,0,0);
+    const { decodePhoto, paintMasks }=await import('./processing.js');
+    const source=document.createElement('canvas');source.width=1206;source.height=2622;const s=source.getContext('2d',{willReadFrequently:true});
+    const drawSource=async item=>{const sourceImage=await decodePhoto(item);s.drawImage(sourceImage,0,0);sourceImage.removeAttribute('src');};
+    await drawSource(state.items[0]);
     const a=g.getImageData(0,0,1206,2622).data,b=s.getImageData(0,0,1206,2622).data;let leftDiff=0;for(let i=0;i<a.length;i++)if(a[i]!==b[i])leftDiff++;
-    s.clearRect(0,0,1206,2622);s.drawImage(state.items[1].image,0,0);
+    s.clearRect(0,0,1206,2622);await drawSource(state.items[1]);
     // Transaction amount ROI, separated from the available balance below it.
     const p=g.getImageData(1206+400,920,660,75).data,q=s.getImageData(400,920,660,75).data;let amountDiff=0;for(let i=0;i<p.length;i++)if(p[i]!==q[i])amountDiff++;
-    const {paintMasks}=await import('./processing.js');const red=document.createElement('canvas');red.width=100;red.height=100;const rg=red.getContext('2d');rg.fillStyle='red';rg.fillRect(0,0,100,100);const mask={x:10,y:10,width:70,height:40};paintMasks(rg,[mask]);const before=rg.getImageData(10,10,70,40).data;rg.fillStyle='blue';rg.fillRect(0,0,100,100);paintMasks(rg,[mask]);const after=rg.getImageData(10,10,70,40).data;return{leftDiff,amountDiff,independent:before.every((v,i)=>v===after[i]),outputFirst:[...a.slice(0,16)],sourceFirst:[...b.slice(0,16)],imageSize:[img.naturalWidth,img.naturalHeight],lost:g.isContextLost?.()};
+    const red=document.createElement('canvas');red.width=100;red.height=100;const rg=red.getContext('2d');rg.fillStyle='red';rg.fillRect(0,0,100,100);const mask={x:10,y:10,width:70,height:40};paintMasks(rg,[mask]);const before=rg.getImageData(10,10,70,40).data;rg.fillStyle='blue';rg.fillRect(0,0,100,100);paintMasks(rg,[mask]);const after=rg.getImageData(10,10,70,40).data;return{leftDiff,amountDiff,independent:before.every((v,i)=>v===after[i]),outputFirst:[...a.slice(0,16)],sourceFirst:[...b.slice(0,16)],imageSize:[img.naturalWidth,img.naturalHeight],lost:g.isContextLost?.()};
   });
   await fs.writeFile(path.join(dest,`pixel-check-${variant}.json`),JSON.stringify(pixelCheck,null,2));
   const unmarked=await page.evaluate(async()=>{const{state}=await import('./app.js');const a=new Uint8Array(await state.results[0].blob.arrayBuffer());let s='';for(let i=0;i<a.length;i+=32768)s+=String.fromCharCode(...a.subarray(i,i+32768));return btoa(s)});
@@ -147,6 +153,7 @@ let context, server;
   pass('水印设置和恢复默认操作有效');
 
   await page.locator('[data-result="0"] [data-result-action="right"]').click();
+  await page.locator('#editorCanvas').waitFor({ state: 'visible' });
   const area=await page.locator('#editorCanvas').boundingBox();
   await page.mouse.move(area.x+15,area.y+22);await page.mouse.down();await page.mouse.move(area.x+70,area.y+55,{steps:5});await page.mouse.up();
   assert.equal(await page.locator('#maskList .mask-chip').count(),3);
@@ -166,10 +173,9 @@ let context, server;
   pass('交换左右和照片前移确实改变配对顺序');
   await page.locator('.photo-item').last().locator('[data-photo-action="remove"]').click();
   await page.evaluate(async()=>{const {state}=await import('./app.js');await state.pendingRender});
-  assert.equal(await page.locator('#pairHint').isVisible(),true);assert.match(await page.locator('#pairHint').innerText(),/最后 1 张将单独/);
   assert.equal(await page.locator('.result-card').count(),5);assert.equal(await page.locator('[data-result="4"] [data-result-action="save"]').isEnabled(),true);
   assert.equal(await page.locator('[data-result="4"] [data-result-action="right"]').count(),0);
-  pass('奇数张的最后一张单独生成成品并可保存');
+  pass('一组只剩一张时可单独生成成品并保存');
 
   const layouts=[];
   for(const width of [320,375,393,430,768,1280]){
@@ -199,7 +205,7 @@ let context, server;
   await page.evaluate(()=>{const real=window.fetch;window.fetch=(url,...args)=>String(url).includes('ocr/manifest.json')?Promise.reject(new Error('test download unavailable')):real(url,...args)});
   await page.locator('#fileInput').setInputFiles(files.slice(0,2));await wait(2);
   assert.equal(await page.locator('[data-result-action="save"]').isDisabled(),true);
-  await page.locator('[data-result-action="left"]').click();await page.keyboard.press('Escape');await page.waitForTimeout(100);
+  await page.locator('[data-result-action="left"]').click();await page.locator('#editor').waitFor({state:'visible'});await page.keyboard.press('Escape');await page.waitForTimeout(100);
   assert.equal(await page.locator('[data-result-action="save"]').isDisabled(),true);
   for(const side of ['left','right']){await page.locator(`[data-result-action="${side}"]`).click();await page.locator('#closeEditor').click();await page.waitForTimeout(250);}
   await page.evaluate(async()=>{const {state}=await import('./app.js');await state.pendingRender});

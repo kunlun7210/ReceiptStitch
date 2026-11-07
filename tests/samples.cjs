@@ -1,6 +1,7 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { chromium, webkit } = require('playwright');
+const { groupBySizes } = require('./photo-groups.cjs');
 const root = path.resolve(__dirname, '..');
 const dest = path.resolve(root, '../qa');
 const samples = process.env.SAMPLE_DIR || path.resolve(__dirname, '../../fixtures');
@@ -22,6 +23,7 @@ const samples = process.env.SAMPLE_DIR || path.resolve(__dirname, '../../fixture
     await page.locator('#fileInput').setInputFiles(files);
     await page.waitForFunction(async()=>{const {state}=await import('./app.js');return state.items.length===10&&!state.busy&&state.items.every(i=>!['pending','processing'].includes(i.status))},null,{timeout:300000});
     await page.evaluate(async()=>{const {state}=await import('./app.js');await state.pending;await state.pendingRender;});
+    await groupBySizes(page, [2, 2, 2, 2, 2]);
     const report=await page.evaluate(async()=>{const {state}=await import('./app.js');return {items:state.items.map(i=>({name:i.name,status:i.status,error:i.error,masks:i.masks,lines:i.lines})),results:state.results.map(r=>({width:r.width,height:r.height,error:r.error})),settings:state.settings,status:document.getElementById('statusDetail').textContent,caches:await caches.keys()};});
     report.errors=errors;report.requests=requests;report.elapsedMs=Date.now()-began;
     await fs.writeFile(path.join(dest,`samples-${process.env.BROWSER||'chrome'}.json`),JSON.stringify(report,null,2));

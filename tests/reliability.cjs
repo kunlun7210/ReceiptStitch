@@ -14,7 +14,7 @@ const record = (name, passed, details) => {
 let server, browser;
 (async () => {
   await fs.mkdir(audit, { recursive: true });
-  const { detectSensitive, outputGeometry } = await import(pathToFileURL(path.join(root, 'dist/processing.js')).href);
+  const { detectSensitive, collageGeometry } = await import(pathToFileURL(path.join(root, 'dist/processing.js')).href);
   const line = (text, x = 40, y = 40, width = 380, height = 32) => ({ text, poly: [[x,y],[x+width,y],[x+width,y+height],[x,y+height]] });
   for (const [name, lines, expected, coverLast = false] of [
     ['全角数字与繁体尾号', [line('銀行卡尾號：１２３４')], ['card']],
@@ -33,9 +33,9 @@ let server, browser;
     const fullNumber = !coverLast || masks.some(mask => mask.x + mask.width >= lines[0].poly[1][0]);
     record(name, JSON.stringify(actual) === JSON.stringify(expected) && fullNumber, { actual, expected, ...(coverLast ? { fullNumber } : {}) });
   }
-  const horizontal = outputGeometry({ naturalWidth: 8193, naturalHeight: 32 }, { naturalWidth: 8191, naturalHeight: 32 });
-  const narrow = outputGeometry({ naturalWidth: 1, naturalHeight: 32 }, { naturalWidth: 25000, naturalHeight: 32 });
-  record('超宽拼图尺寸上限与窄图保留', horizontal.width <= 8192 && narrow.leftWidth >= 1 && narrow.rightWidth >= 1, { horizontal, narrow });
+  const horizontal = collageGeometry([{ width: 8193, height: 32 }, { width: 8191, height: 32 }]);
+  const narrow = collageGeometry([{ width: 1, height: 32 }, { width: 25000, height: 32 }]);
+  record('超宽拼图尺寸上限与窄图保留', horizontal.width <= 8192 && narrow.panels.every(panel => panel.width >= 1), { horizontal, narrow });
   const requests = [];
   let failManifest = false, failWorker = false;
   server = require(path.join(root, 'scripts/serve.cjs'))({ basePath: '/ReceiptStitch/' });
@@ -69,14 +69,15 @@ let server, browser;
   const started = await select(page, files);
   if (started.results !== 1 || started.statuses.some(value => value !== 'ready')) throw new Error('Fixture OCR setup failed: ' + JSON.stringify(started));
   const resized = await page.evaluate(async () => {
-    const { composePair, DEFAULTS } = await import('./processing.js');
+    const { composeCollage, DEFAULTS } = await import('./processing.js');
     const mask = { x: 1, y: 5, width: 8, height: 8, kind: 'manual', source: 'manual', style: 'solid' };
     const make = async color => {
       const canvas = document.createElement('canvas'); canvas.width = 16384; canvas.height = 32;
       const context = canvas.getContext('2d'); context.fillStyle = '#fff'; context.fillRect(0,0,canvas.width,canvas.height);
       context.fillStyle = color; context.fillRect(mask.x,mask.y,mask.width,mask.height);
-      const image = new Image(); image.src = canvas.toDataURL('image/png'); await image.decode(); canvas.width = canvas.height = 1;
-      const result = await composePair({ image, masks: [mask] }, undefined, { ...DEFAULTS, text: '' });
+      const photo = { name: 'wide-fixture.png', url: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height, masks: [mask] };
+      canvas.width = canvas.height = 1;
+      const result = await composeCollage([photo], { ...DEFAULTS, text: '' });
       const output = new Image(), url = URL.createObjectURL(result.blob); output.src = url; await output.decode();
       canvas.width = result.width; canvas.height = result.height; context.drawImage(output,0,0);
       const pixels = context.getImageData(0,0,canvas.width,canvas.height).data; canvas.width = canvas.height = 1;
@@ -90,6 +91,7 @@ let server, browser;
   record('缩放后遮挡边缘不残留原始像素', resized.differingChannels === 0, resized);
 
   await page.locator('[data-result="0"] [data-result-action="left"]').click();
+  await page.locator('#editorCanvas').waitFor({ state: 'visible' });
   const box = await page.locator('#editorCanvas').boundingBox();
   await page.mouse.move(box.x+30,box.y+50); await page.mouse.down();
   await page.mouse.move(box.x+95,box.y+105,{steps:5}); await page.mouse.up();
@@ -124,7 +126,7 @@ let server, browser;
   const payload = async name => ({ name, mimeType:'image/png', buffer:await fs.readFile(path.join(samples,name)) });
   const batch = [await payload('9.PNG'), { name:'audit-corrupt.png', mimeType:'image/png', buffer:Buffer.from('not an image') }, await payload('10.PNG')];
   const before = await status(page), after = await select(page, batch);
-  record('损坏图片不会打乱整批配对', before.count === after.count && before.results === after.results && !after.busy, { before: before.count, after: after.count, resultCount: after.results });
+  record('损坏图片不会改变原分组', before.count === after.count && before.results === after.results && !after.busy, { before: before.count, after: after.count, resultCount: after.results });
   await page.locator('#clearButton').click(); await settle(page); await select(page, files[0]);
   await page.evaluate(() => {
     Object.defineProperty(navigator,'userAgent',{configurable:true,value:'Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X)'});

@@ -43,6 +43,7 @@ let browser, server;
   assert.deepEqual(await page.evaluate(async()=>(await import('./app.js')).state.items.map(i=>i.status)),['ready','ready']);
   const automaticBefore=await page.evaluate(async()=>(await import('./app.js')).state.items[1].masks.filter(m=>m.kind!=='manual'));
   await page.locator('[data-result="0"] [data-result-action="right"]').click();
+  await page.locator('#editorCanvas').waitFor({ state: 'visible' });
   const box=await page.locator('#editorCanvas').boundingBox(),scale=box.width/1206;
   await page.mouse.move(box.x+60*scale,box.y+600*scale);await page.mouse.down();await page.mouse.move(box.x+1140*scale,box.y+1550*scale,{steps:6});await page.mouse.up();
   await page.evaluate(()=>Object.defineProperty(navigator,'canShare',{configurable:true,value:()=>false}));
@@ -65,6 +66,7 @@ let browser, server;
       exports.push({style,direction,width:meta.width,height:meta.height,sha256:crypto.createHash('sha256').update(bytes).digest('hex')});
     }
     await page.locator('[data-result="0"] [data-result-action="right"]').click();
+    await page.locator('#editorCanvas').waitFor({ state: 'visible' });
     assert.equal(await page.locator(`[data-mask-style="${style}"]`).getAttribute('aria-pressed'),'true');
     console.log('PASS',variant,style,'live switch, editor preview, horizontal/vertical download and reopening preserve style');
   }

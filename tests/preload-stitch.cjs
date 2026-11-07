@@ -4,6 +4,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const sharp = require('sharp');
 const { chromium, webkit } = require('playwright');
+const { groupBySizes } = require('./photo-groups.cjs');
 const variant = process.env.BROWSER || 'chrome';
 const root = path.resolve(__dirname, '..');
 const outputs = path.resolve(root, '../../outputs');
@@ -36,7 +37,7 @@ let server, browser;
   const pass = name => { checks.push(name); console.log('PASS', variant, name); };
   const waitRender = () => page.evaluate(async () => { const { state } = await import('./app.js'); await state.pending; await state.pendingRender; });
   assert.equal(await page.locator('input[value="horizontal"]').isChecked(), true);
-  assert.equal(await page.locator('#stitchSummary').innerText(), '横向拼接 · 第一张在左');
+  assert.equal(await page.locator('#stitchSummary').innerText(), '横向拼接');
   assert.equal(requests.some(url => url.includes('/ocr/')), false, 'Opening the page must not download models');
   const fonts = await page.evaluate(() => ({ brand: getComputedStyle(document.querySelector('.brand')).fontSize, steps: getComputedStyle(document.querySelector('.steps')).fontSize, weight: getComputedStyle(document.querySelector('.brand')).fontWeight }));
   assert.equal(fonts.brand, fonts.steps); assert.equal(fonts.weight, '400');
@@ -66,6 +67,7 @@ let server, browser;
   await page.locator('#fileInput').setInputFiles(files);
   await page.waitForFunction(async () => { const { state } = await import('./app.js'); return state.items.length === 10 && !state.busy; }, null, { timeout: 180000 }); await waitRender();
   assert.deepEqual(await page.evaluate(async () => (await import('./app.js')).state.items.map(item => item.status)), Array(10).fill('ready'));
+  await groupBySizes(page, [2, 2, 2, 2, 2]);
   async function saveResults(direction) {
     const records = [];
     const dest = path.join(outputs, `本地验证-${direction === 'vertical' ? '竖向' : '横向'}拼接`);
@@ -106,19 +108,23 @@ let server, browser;
   await page.waitForTimeout(220); await waitRender();
   const pixels = await page.evaluate(async () => {
     const { state } = await import('./app.js'); const canvases = [];
+    const { collageGeometry, decodePhoto } = await import('./processing.js');
+    const panels = state.results.map(result => collageGeometry(result.photos, result.layout).panels);
     for (const r of state.results) { const image = new Image(); image.src = r.url; await image.decode(); const c = document.createElement('canvas'); c.width = r.width; c.height = r.height; c.getContext('2d').drawImage(image, 0, 0); canvases.push(c); }
     let checked = 0;
     for (const [index, roi] of [[1,[457,670,106,34]],[1,[597,1031,196,34]],[3,[457,685,106,34]],[3,[597,1046,183,34]],[5,[626,776,96,34]],[5,[413,956,184,34]],[7,[506,684,90,33]],[9,[618,935,106,34]],[9,[412,1115,101,34]]]) {
-      const pair = Math.floor(index / 2), r = state.results[pair], source = state.items[index].image, scale = r.width / source.naturalWidth;
+      const pair = Math.floor(index / 2), r = state.results[pair], scale = r.width / state.items[index].width;
       const [x,y,w,h] = roi.map(value => Math.round(value * scale));
-      const data = canvases[pair].getContext('2d').getImageData(x, r.firstHeight + y, w, h).data;
+      const data = canvases[pair].getContext('2d').getImageData(x, panels[pair][1].y + y, w, h).data;
       for (let i = 0; i < data.length; i += 4) if (data[i] < 190 || data[i] > 240 || data[i] !== data[i + 1] || data[i] !== data[i + 2] || data[i + 3] !== 255) throw new Error(`Uncovered vertical sensitive pixel in image ${index + 1}`);
       checked++;
     }
-    const source = document.createElement('canvas'); source.width = 1206; source.height = 2622; const g = source.getContext('2d'); g.drawImage(state.items[0].image, 0, 0);
+    const source = document.createElement('canvas'); source.width = 1206; source.height = 2622; const g = source.getContext('2d');
+    const drawSource = async index => { const image = await decodePhoto(state.items[index]); g.drawImage(image, 0, 0); image.removeAttribute('src'); };
+    await drawSource(0);
     const a = canvases[0].getContext('2d').getImageData(0,0,1206,2622).data, b = g.getImageData(0,0,1206,2622).data;
     let firstDiff = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) firstDiff++;
-    g.clearRect(0,0,1206,2622); g.drawImage(state.items[1].image,0,0);
+    g.clearRect(0,0,1206,2622); await drawSource(1);
     const p = canvases[0].getContext('2d').getImageData(400,2622+920,660,75).data, q = g.getImageData(400,920,660,75).data;
     let amountDiff = 0; for (let i=0;i<p.length;i++) if (p[i] !== q[i]) amountDiff++;
     canvases.forEach(c => c.width = c.height = 1); source.width = source.height = 1;

@@ -29,14 +29,20 @@
     <section class="upload-panel" id="dropZone" aria-labelledby="uploadTitle">
       <div class="upload-symbol" aria-hidden="true"><svg viewBox="0 0 48 48"><rect x="5" y="11" width="27" height="32" rx="5"/><path d="M12 34l6-7 5 5 3-3 6 7"/><circle cx="15" cy="20" r="2"/><path d="M24 5h14a5 5 0 0 1 5 5v22M37 15v12M31 21h12"/></svg></div>
       <h2 id="uploadTitle">选择要处理的图片</h2>
-      <p id="uploadOrderHint">按选择顺序左右排列</p>
       <button class="primary" id="chooseButton"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>从相册选择</button>
       <input type="file" id="fileInput" accept="image/*" multiple hidden>
       <div class="upload-note">可分次添加 · 支持批量 · 保留原图</div>
     </section>
 
     <section class="workbench" id="workbench" hidden aria-labelledby="photosTitle">
-      <div class="section-title"><div><h2 id="photosTitle">已选照片 <span id="photoCount">0</span></h2><p id="photoOrderHint">单张可直接处理；多张按选择顺序左右排列，可调整顺序</p></div><button class="text-button" id="clearButton">清空</button></div>
+      <div class="section-title"><div><h2 id="photosTitle">已选照片 <span id="photoCount">0</span></h2><p>点照片检查遮挡</p></div><button class="text-button" id="clearButton">清空</button></div>
+      <fieldset class="group-options" id="groupOptions" aria-describedby="groupHint" hidden>
+        <legend class="visually-hidden">处理分组</legend>
+        <label><input class="visually-hidden" type="radio" name="groupMode" value="all" checked><span>合成一张</span></label>
+        <label><input class="visually-hidden" type="radio" name="groupMode" value="single"><span>逐张处理</span></label>
+        <label><input class="visually-hidden" type="radio" name="groupMode" value="custom"><span>自定义分组</span></label>
+      </fieldset>
+      <p class="group-hint" id="groupHint" aria-live="polite" hidden></p>
       <div class="photo-list" id="photoList"></div>
       <button class="add-more" id="addMoreButton">＋ 继续添加照片</button>
       <div class="status-box" role="status" aria-live="polite"><span class="status-dot" id="statusDot"></span><div><strong id="statusTitle">准备识别</strong><p id="statusDetail">照片只在当前设备处理</p></div><button class="text-button" id="retryButton" hidden>重试识别</button></div>
@@ -55,19 +61,20 @@
     </details>
 
     <details class="settings stitch-settings" id="stitchSettings">
-      <summary><div class="settings-label"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="7" height="14" rx="1.5"/><rect x="14" y="5" width="7" height="14" rx="1.5"/></svg><span>拼图设置<small id="stitchSummary">横向拼接 · 第一张在左</small></span></div><span class="chevron">⌄</span></summary>
+      <summary><div class="settings-label"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="7" height="14" rx="1.5"/><rect x="14" y="5" width="7" height="14" rx="1.5"/></svg><span>拼图设置<small id="stitchSummary">横向拼接</small></span></div><span class="chevron">⌄</span></summary>
       <div class="settings-content">
-        <fieldset class="stitch-options full"><legend class="visually-hidden">拼接方向</legend>
-          <label class="stitch-option"><input type="radio" name="stitchDirection" value="horizontal" checked><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="2" y="3" width="12" height="20" rx="2"/><rect x="18" y="3" width="12" height="20" rx="2"/></svg><strong>横向拼接</strong><small>第一张在左，第二张在右</small></span></label>
-          <label class="stitch-option"><input type="radio" name="stitchDirection" value="vertical"><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="5" y="1" width="22" height="10" rx="2"/><rect x="5" y="15" width="22" height="10" rx="2"/></svg><strong>竖向拼接</strong><small>第一张在上，第二张在下</small></span></label>
+        <fieldset class="stitch-options full"><legend class="visually-hidden">拼图样式</legend>
+          <label class="stitch-option"><input type="radio" name="stitchDirection" value="horizontal" checked><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="2" y="3" width="12" height="20" rx="2"/><rect x="18" y="3" width="12" height="20" rx="2"/></svg><strong>横向拼接</strong><small>统一高度，排成一行</small></span></label>
+          <label class="stitch-option"><input type="radio" name="stitchDirection" value="vertical"><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="5" y="1" width="22" height="10" rx="2"/><rect x="5" y="15" width="22" height="10" rx="2"/></svg><strong>竖向拼接</strong><small>统一宽度，排成一列</small></span></label>
+          <label class="stitch-option"><input type="radio" name="stitchDirection" value="grid-2"><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="4" y="2" width="10" height="9" rx="1.5"/><rect x="18" y="2" width="10" height="9" rx="1.5"/><rect x="4" y="15" width="10" height="9" rx="1.5"/><rect x="18" y="15" width="10" height="9" rx="1.5"/></svg><strong>双列网格</strong><small>每行最多 2 张</small></span></label>
+          <label class="stitch-option"><input type="radio" name="stitchDirection" value="grid-3"><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="2" y="2" width="7" height="9" rx="1.5"/><rect x="12.5" y="2" width="7" height="9" rx="1.5"/><rect x="23" y="2" width="7" height="9" rx="1.5"/><rect x="2" y="15" width="7" height="9" rx="1.5"/><rect x="12.5" y="15" width="7" height="9" rx="1.5"/><rect x="23" y="15" width="7" height="9" rx="1.5"/></svg><strong>三列网格</strong><small>每行最多 3 张</small></span></label>
         </fieldset>
-        <p class="stitch-hint full" id="stitchHint">单张图片直接打码加水印；两张图片按同高拼接，保留完整画面。</p>
+        <p class="stitch-hint full">每组应用当前样式，保留完整画面。单张直接打码加水印。</p>
       </div>
     </details>
 
     <section id="resultsSection" class="results-section" hidden aria-labelledby="resultsTitle">
       <div class="section-title"><div><h2 id="resultsTitle">处理结果 <span id="resultCount">0</span></h2><p>检查遮挡后，再保存到相册</p></div><button class="primary compact" id="saveAllButton" disabled>保存全部</button></div>
-      <p class="pair-hint" id="pairHint" hidden></p>
       <div id="results" class="results"></div>
     </section>
 
@@ -101,8 +108,8 @@
   </dialog>
   <dialog id="helpDialog" class="help-dialog">
     <div class="dialog-heading"><h2>把智能隐私拼图放进主屏幕</h2><button id="closeHelp" class="icon-button" aria-label="关闭说明">×</button></div>
-    <ol class="help-list"><li>在 iPhone 的 <strong>Safari</strong> 中打开本页。</li><li>点“分享”，选择<strong>“添加到主屏幕”</strong>，保留“作为网页 App 打开”。</li><li>打开主屏幕图标，选择一张或多张图片。单张直接打码加水印；多张时相邻两张拼接，最后落单的一张单独处理。</li><li>等待识别，点图片检查或补框，再点<strong>“保存图片”</strong>。在系统面板选择“存储图像”。</li></ol>
-    <div class="help-note">支持“银行卡尾号 / 卡号尾号 / 尾号”和“可用余额 / 可用额度”。交易金额保留。横向按同高、竖向按同宽拼接，保留完整画面。</div>
+    <ol class="help-list"><li>在 iPhone 的 <strong>Safari</strong> 中打开本页。</li><li>点“分享”，选择<strong>“添加到主屏幕”</strong>，保留“作为网页 App 打开”。</li><li>选择照片，可合成一张、逐张处理或自定义分组。点“拼图设置”选择横向、竖向或网格样式。</li><li>等待识别，点图片检查或补框，再点<strong>“保存图片”</strong>。在系统面板选择“存储图像”。</li></ol>
+    <div class="help-note">支持“银行卡尾号 / 卡号尾号 / 尾号”和“可用余额 / 可用额度”。交易金额保留，拼接时保留完整画面。</div>
     <p class="help-note">首次需要联网准备约 40 MB 的本地识别组件。准备完成后，本工具可离线识别；浏览器清理缓存后需要重新准备。关闭页面会清空照片，水印设置会保留。</p>
     <button class="secondary full-width" id="prepareButton">提前下载识别模型</button><p class="model-download-status" id="prepareSource">默认下载源：jsDelivr</p><progress id="prepareProgress" max="1" value="0" aria-label="识别模型下载进度" hidden></progress><p id="prepareStatus" role="status"></p>
   </dialog>
