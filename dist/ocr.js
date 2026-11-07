@@ -1,7 +1,42 @@
 const ASSET_CACHE = 'receipt-stitch-ocr-v1';
 let pending;
 let latestStatus;
+let registration;
 const listeners = new Set();
+
+export function registerAppWorker() {
+  if (!registration) {
+    const attempt = Promise.resolve().then(() => navigator.serviceWorker.register('./sw.js')).catch(error => {
+      if (registration === attempt) registration = undefined;
+      throw error;
+    });
+    registration = attempt;
+  }
+  return registration;
+}
+
+async function waitForAppWorker() {
+  const workers = navigator.serviceWorker;
+  if (workers.controller) return;
+  await new Promise((resolve, reject) => {
+    const attempt = registerAppWorker();
+    let finished = false;
+    const finish = error => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer); workers.removeEventListener('controllerchange', controlled);
+      if (error) {
+        if (registration === attempt) registration = undefined;
+        reject(new Error('本地缓存无法启动，请重新打开页面后重试。'));
+      } else resolve();
+    };
+    const controlled = () => { if (workers.controller) finish(); };
+    const timer = setTimeout(() => finish(true), 15000);
+    workers.addEventListener('controllerchange', controlled);
+    attempt.then(controlled, finish);
+    controlled();
+  });
+}
 
 export async function ocrCacheStatus() {
   if (!window.isSecureContext || !('caches' in window)) return { supported: false, ready: false, partial: false };
@@ -116,9 +151,8 @@ async function reusePrevious(file, base, cache) {
   if (!old?.ok) return;
   try {
     const bytes = await verified(await old.arrayBuffer(), file);
-    const asset = responseFor(bytes, file.file);
-    await cache.put(new URL(file.file, base), asset.clone());
-    return asset;
+    await cache.put(new URL(file.file, base), responseFor(bytes, file.file));
+    return true;
   } catch { /* A different/corrupt old version must be downloaded normally. */ }
 }
 
@@ -128,19 +162,34 @@ async function load(onStatus) {
   }
   const base = new URL('./', document.baseURI);
   onStatus('正在准备本地识别组件，首次使用需要联网…');
-  const response = await fetch(new URL('ocr/manifest.json', base));
-  if (!response.ok) throw new Error('识别组件清单读取失败，请联网重试。');
-  const manifest = await response.clone().json();
+  // Do not download assets if the worker that serves them cannot start.
+  await waitForAppWorker();
+  const manifestURL = new URL('ocr/manifest.json', base);
+  let manifest, manifestBytes;
+  try {
+    manifestBytes = await download(manifestURL, () => {});
+    manifest = JSON.parse(new TextDecoder().decode(manifestBytes));
+    if (!Array.isArray(manifest.files) || !manifest.files.length) throw new Error('Invalid manifest');
+  } catch { throw new Error('识别组件清单读取失败，请联网重试。'); }
   const cache = await caches.open(ASSET_CACHE);
-  const models = [], assets = new Map(), states = new Map();
+  const models = [], states = new Map();
   let supportsCompression = false;
   try { supportsCompression = Boolean(new DecompressionStream('gzip')); } catch {}
+  const seen = new Set();
   for (const file of manifest.files) {
-    if (!/^ocr\/(runtime-v1|models-v1)\/[\w./-]+$/.test(file.file) || file.file.includes('..')) throw new Error('识别组件路径无效。');
-    if (file.transport && (!/^ocr\/transport-v1\/[a-f0-9]{64}\.gz$/.test(file.transport.file) || !Number.isSafeInteger(file.transport.bytes))) throw new Error('识别组件传输路径无效。');
-    const asset = await cache.match(new URL(file.file, base)) || await reusePrevious(file, base, cache);
-    if (asset) assets.set(file.file, asset);
-    else states.set(file.file, { loaded: 0, bytes: supportsCompression && file.transport ? file.transport.bytes : file.bytes });
+    if (!file || !/^ocr\/(runtime-v1|models-v1)\/[\w./-]+$/.test(file.file) || file.file.includes('..') || seen.has(file.file)
+      || !Number.isSafeInteger(file.bytes) || file.bytes <= 0 || !/^[a-f0-9]{64}$/.test(file.sha256)) throw new Error('识别组件清单无效，请联网重试。');
+    if (file.transport && (!/^ocr\/transport-v1\/[a-f0-9]{64}\.gz$/.test(file.transport.file) || !Number.isSafeInteger(file.transport.bytes) || file.transport.bytes <= 0
+      || !/^[a-f0-9]{64}$/.test(file.transport.sha256))) throw new Error('识别组件传输清单无效，请联网重试。');
+    seen.add(file.file);
+  }
+  for (const file of manifest.files) {
+    const url = new URL(file.file, base), asset = await cache.match(url);
+    if (asset?.ok) {
+      try { await verified(await asset.arrayBuffer(), file); continue; } catch {}
+    }
+    if (asset) await cache.delete(url);
+    if (!await reusePrevious(file, base, cache)) states.set(file.file, { loaded: 0, bytes: supportsCompression && file.transport ? file.transport.bytes : file.bytes });
   }
   let sourceOrder = sourceBases(manifest, base);
   let activeSource = sourceOrder[0];
@@ -199,8 +248,7 @@ async function load(onStatus) {
       } else bytes = await download(url, onBytes);
       await verified(bytes, file);
     }
-    const asset = responseFor(bytes, file.file);
-    await cache.put(url, asset.clone()); assets.set(file.file, asset);
+    await cache.put(url, responseFor(bytes, file.file));
     state.loaded = state.bytes; progress('download', true);
   }
   // Two downloads overlap latency without opening many large buffers on iPhones.
@@ -209,19 +257,17 @@ async function load(onStatus) {
   }));
   const failed = results.find(result => result.status === 'rejected');
   if (failed) throw failed.reason;
-  for (const file of manifest.files) {
-    if (file.file.startsWith('ocr/models-v1/')) models.push(URL.createObjectURL(await assets.get(file.file).blob()));
-  }
-  await cache.put(new URL('ocr/manifest.json', base), response);
-  await navigator.serviceWorker.ready;
-  if (!navigator.serviceWorker.controller) await new Promise(resolve => {
-    navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true });
-  });
   onStatus('组件已准备好，正在启动本地文字识别…', { phase: 'initializing' });
   try {
+    for (const file of manifest.files) if (file.file.startsWith('ocr/models-v1/')) {
+      const asset = await cache.match(new URL(file.file, base));
+      if (!asset?.ok) throw new Error('模型缓存读取失败，请重试下载。');
+      models.push(URL.createObjectURL(await asset.blob()));
+    }
+    await cache.put(manifestURL, new Response(manifestBytes, { headers: { 'Content-Type': 'application/json' } }));
     const { createEngine } = await import('./ocr/runtime-v1/engine.js');
     const engine = await createEngine({ models, ortBase: new URL('ocr/runtime-v1/ort/', base).href });
-    try { await navigator.storage?.persist?.(); } catch {}
+    try { void navigator.storage?.persist?.().catch(() => {}); } catch {}
     onStatus('本地识别已准备好', { phase: 'ready' });
     return engine;
   } finally { models.forEach(url => URL.revokeObjectURL(url)); }
@@ -233,14 +279,17 @@ export async function scanImage(image, onStatus) {
   // Bounded input keeps memory stable on iPhones. Coordinates are mapped back to the original.
   const scale = Math.min(1, 1400 / image.naturalHeight, 1100 / image.naturalWidth);
   const canvas = document.createElement('canvas');
-  canvas.width = Math.round(image.naturalWidth * scale);
-  canvas.height = Math.round(image.naturalHeight * scale);
-  canvas.getContext('2d').drawImage(image, 0, 0, canvas.width, canvas.height);
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const scaleX = canvas.width / image.naturalWidth, scaleY = canvas.height / image.naturalHeight;
   try {
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('图片读取失败，请缩小图片后重试。');
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
     const predictions = await engine.predict(canvas);
     return predictions.flatMap(result => result.items || []).map(item => ({
       text: item.text, score: item.score,
-      poly: item.poly.map(point => [point[0] / scale, point[1] / scale]),
+      poly: item.poly.map(point => [point[0] / scaleX, point[1] / scaleY]),
     }));
   } finally { canvas.width = canvas.height = 1; }
 }

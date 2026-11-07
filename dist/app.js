@@ -1,9 +1,10 @@
-import { DEFAULTS, COMMON_COLORS, PALETTE, detectSensitive, paintMasks, composePair, makeThumbnail } from './processing.js';
-import { scanImage, prepareOCR, ocrCacheStatus } from './ocr.js';
+import { DEFAULTS, COMMON_COLORS, PALETTE, detectSensitive, paintMasks, composePair, makeThumbnail, boundedImageSize } from './processing.js';
+import { scanImage, prepareOCR, ocrCacheStatus, registerAppWorker } from './ocr.js';
 
 const $ = id => document.getElementById(id);
 export const state = { items: [], results: [], busy: false, settings: { ...DEFAULTS }, stitchDirection: 'horizontal', manualMaskStyle: 'mosaic', sequence: 0, revision: 0, pending: Promise.resolve() };
 let toastTimer, renderTimer, rendering = Promise.resolve(), editing = null, drawing = null, drawEnabled = true, editingStyle = 'mosaic';
+let renderedRevision = -1;
 const editorPointers = new Map();
 let editorGesture = null, editorPanAnchor = null, scrollbarDrag = null, editorPageScroll = null;
 let modelPreparation = null, modelPhase = 'idle';
@@ -28,11 +29,11 @@ if ('serviceWorker' in navigator) {
   const alreadyControlled = Boolean(navigator.serviceWorker.controller);
   navigator.serviceWorker.addEventListener('controllerchange', () => {
     if (!alreadyControlled) return;
-    if (state.items.length === 0) location.reload();
+    if (state.items.length === 0 && !state.busy && !modelPreparation) location.reload();
     else toast('新版本已准备好，保存照片后重新打开即可更新。');
   });
-  navigator.serviceWorker.register('./sw.js').catch(() => {
-    $('offlineStatus').textContent = '离线缓存不可用；请在 Safari 的 HTTPS 页面中使用。';
+  registerAppWorker().catch(() => {
+    if (!navigator.serviceWorker.controller) $('offlineStatus').textContent = '离线缓存未能启动；请重新打开页面后重试。';
   });
 }
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 4500); }
@@ -119,80 +120,115 @@ async function loadImage(file) {
 }
 async function importFiles(files) {
   if (state.busy) { toast('正在处理这一批，请完成后再添加照片。'); return; }
-  files = files.filter(file => file.type.startsWith('image/') || /\.(png|jpe?g|webp|heic|heif)$/i.test(file.name));
   if (!files.length) return toast('请选择相册中的图片。');
+  const unsupported = files.find(file => !file.type.startsWith('image/') && !/\.(png|jpe?g|webp|heic|heif|gif|avif|bmp)$/i.test(file.name));
+  if (unsupported) return toast(`${unsupported.name} 不是可读取的图片，本批未添加。`);
   if (state.items.length + files.length > 20) return toast('一次最多 20 张照片，可先保存再处理下一批。');
-  state.busy = true;
-  $('chooseButton').disabled = $('addMoreButton').disabled = true;
-  const errors = [];
+  setProcessing(true); markResultsStale();
   status('正在读取照片', '按你的选择顺序排列');
-  // Keep picker order, including IMG_*. Numeric sample filenames are naturally sorted only by the picker itself.
-  for (const file of files) {
-    try {
+  const batch = [];
+  try {
+    // Commit only a complete selection so a failed decode cannot shift pairs.
+    for (const file of files) {
       const { image, url } = await loadImage(file);
-      const item = { id: ++state.sequence, name: file.name, image, url, thumbnail: null, masks: [], lines: [], status: 'pending', reviewed: false, manualRevision: 0 };
-      item.thumbnail = await makeThumbnail(item); state.items.push(item);
-    } catch (error) { errors.push(error.message); }
+      const item = { id: ++state.sequence, name: file.name, image, url, thumbnail: null, thumbnailRevision: 0, masks: [], status: 'pending', reviewed: false };
+      batch.push(item);
+      item.thumbnail = await makeThumbnail(item).catch(() => null);
+    }
+  } catch (error) {
+    batch.forEach(releaseItem);
+    setProcessing(false); renderPhotos(); invalidateResults(0);
+    const message = `${error.message} 本批未添加，原配对顺序保留。`;
+    status('读取图片失败', message, true); toast(message);
+    return;
   }
+  state.items.push(...batch);
   renderPhotos();
-  if (errors.length) toast(errors.join('；'));
-  await analyzePending();
+  return analyzePending();
+}
+
+function setProcessing(busy) {
+  state.busy = busy;
+  $('chooseButton').disabled = $('addMoreButton').disabled = busy;
+  $('clearButton').disabled = busy;
 }
 
 async function analyzePending() {
-  state.busy = true; $('progress').hidden = false; $('retryButton').hidden = true;
+  if (!state.busy) { setProcessing(true); markResultsStale(); }
+  $('progress').hidden = false; $('progress').value = 0; $('retryButton').hidden = true;
   const targets = state.items.filter(item => item.status === 'pending' || item.status === 'error');
   let completed = 0;
-  for (const item of targets) {
-    item.status = 'processing'; renderPhotos();
-    try {
-      status(`正在识别 ${completed + 1} / ${targets.length}`, item.name);
-      const lines = await scanImage(item.image, (message, info) => {
-        if (info?.phase !== 'recognizing') showModelPreparation(message, info);
-        if (info?.phase === 'recognizing') {
-          status(`正在识别 ${completed + 1} / ${targets.length}`, item.name);
-          $('progress').setAttribute('aria-label','图片识别进度');
-          $('progress').value = completed / targets.length;
-        } else {
-          status(info?.phase === 'download' ? '下载本地识别组件' : '准备本地文字识别', message);
-          $('progress').setAttribute('aria-label','识别组件下载进度');
-          if (info?.total) $('progress').value = info.loaded / info.total;
-          else $('progress').removeAttribute('value');
+  try {
+    for (const item of targets) {
+      item.status = 'processing'; renderPhotos();
+      try {
+        status(`正在识别 ${completed + 1} / ${targets.length}`, item.name);
+        const lines = await scanImage(item.image, (message, info) => {
+          if (info?.phase !== 'recognizing') showModelPreparation(message, info);
+          if (info?.phase === 'recognizing') {
+            status(`正在识别 ${completed + 1} / ${targets.length}`, item.name);
+            $('progress').setAttribute('aria-label','图片识别进度');
+            $('progress').value = completed / targets.length;
+          } else {
+            status(info?.phase === 'download' ? '下载本地识别组件' : '准备本地文字识别', message);
+            $('progress').setAttribute('aria-label','识别组件下载进度');
+            if (info?.total) $('progress').value = info.loaded / info.total;
+            else $('progress').removeAttribute('value');
+          }
+        });
+        const automatic = detectSensitive(lines, item.image.naturalWidth, item.image.naturalHeight, item.image);
+        // Keep manual selections made while inference was running.
+        item.masks = [...automatic, ...item.masks.filter(m => m.source === 'manual')];
+        item.status = 'ready'; updateOfflineStatus();
+        if (item === editing) redrawEditor();
+      } catch (error) {
+        item.status = 'error'; item.error = /下载|联网|读取|校验|HTTPS|启动|超时/.test(error.message) ? error.message : '本地识别暂未完成，请重试。';
+        if (modelPhase !== 'ready') {
+          showModelError(error);
+          // A shared setup failure cannot be fixed by running the remaining photos.
+          for (const rest of targets.slice(completed + 1)) { rest.status = 'error'; rest.error = item.error; }
+          break;
         }
-      });
-      const automatic = detectSensitive(lines, item.image.naturalWidth, item.image.naturalHeight, item.image);
-      // Never overwrite edits made while inference was running.
-      item.lines = lines;
-      item.masks = [...automatic, ...item.masks.filter(m => m.source === 'manual')];
-      item.status = 'ready'; updateOfflineStatus();
-    } catch (error) {
-      if (modelPhase !== 'ready') showModelError(error);
-      item.status = 'error'; item.error = /下载|联网|读取|校验|HTTPS/.test(error.message) ? error.message : '本地识别暂未完成，请重试。';
-      status('自动识别未完成', `${item.error} 可重试，或逐张手动框选后完成检查。`, true);
-      // Initialization failures should not trigger repeated downloads for every photo.
-      for (const rest of targets.slice(completed + 1)) { rest.status = 'error'; rest.error = item.error; }
-      break;
+      }
+      await refreshThumbnail(item);
+      $('progress').value = ++completed / targets.length;
+      renderPhotos();
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
-    await refreshThumbnail(item);
-    $('progress').value = ++completed / targets.length;
-    renderPhotos();
-    await new Promise(resolve => setTimeout(resolve, 0));
+  } finally {
+    for (const item of targets) if (['pending','processing'].includes(item.status)) { item.status = 'error'; item.error = '本地识别暂未完成，请重试。'; }
+    setProcessing(false); $('progress').hidden = true;
+    const failure = state.items.find(item => item.status === 'error');
+    $('retryButton').hidden = !failure;
+    if (failure) status('自动识别未完成', `${failure.error} 可重试，或逐张手动框选后完成检查。`, true);
+    else if (state.items.length) status('识别完成', '请检查卡尾号和可用余额的遮挡位置。可点照片手动补框。');
+    renderPhotos(); invalidateResults(0);
   }
-  state.busy = false; $('chooseButton').disabled = $('addMoreButton').disabled = false; $('progress').hidden = true;
-  $('statusDot').classList.remove('busy');
-  if (state.items.some(item => item.status === 'error')) $('retryButton').hidden = false;
-  else if (state.items.length) status('识别完成', '请检查卡尾号和可用余额的遮挡位置。可点照片手动补框。');
-  renderPhotos(); invalidateResults(0); await rendering;
+  await state.pendingRender;
 }
 $('retryButton').addEventListener('click', () => { if (!state.busy) state.pending = analyzePending(); });
 
-async function refreshThumbnail(item) { const next = await makeThumbnail(item); if (item.thumbnail) URL.revokeObjectURL(item.thumbnail); item.thumbnail = next; }
+function releaseItem(item) {
+  URL.revokeObjectURL(item.url);
+  if (item.thumbnail) URL.revokeObjectURL(item.thumbnail);
+  item.image.removeAttribute('src');
+}
+async function refreshThumbnail(item) {
+  const revision = ++item.thumbnailRevision;
+  const next = await makeThumbnail(item).catch(() => null);
+  if (revision !== item.thumbnailRevision || !state.items.includes(item)) {
+    if (next) URL.revokeObjectURL(next);
+    return;
+  }
+  if (item.thumbnail) URL.revokeObjectURL(item.thumbnail);
+  item.thumbnail = next;
+}
 function renderPhotos() {
   const count = state.items.length;
   $('workbench').hidden = !count; $('dropZone').hidden = count > 0; $('photoCount').textContent = count;
   $('clearButton').disabled = state.busy;
   $('photoList').innerHTML = state.items.map((item, index) => `<article class="photo-item" data-id="${item.id}">
-    <button class="photo-figure" data-photo-action="edit" aria-label="检查第 ${index + 1} 张照片的遮挡"><img src="${item.thumbnail}" alt="${escapeHTML(item.name)}"><span class="photo-number">${index + 1}</span><span class="photo-state${['pending','processing'].includes(item.status) ? ' pending' : item.status === 'error' && !item.reviewed ? ' failed' : ''}">${item.status === 'ready' || item.reviewed ? '✓' : item.status === 'error' ? '!' : '…'}</span></button>
+    <button class="photo-figure" data-photo-action="edit" aria-label="检查第 ${index + 1} 张照片的遮挡">${item.thumbnail ? `<img src="${item.thumbnail}" alt="${escapeHTML(item.name)}">` : '<span>点此检查图片</span>'}<span class="photo-number">${index + 1}</span><span class="photo-state${['pending','processing'].includes(item.status) ? ' pending' : item.status === 'error' && !item.reviewed ? ' failed' : ''}">${item.status === 'ready' || item.reviewed ? '✓' : item.status === 'error' ? '!' : '…'}</span></button>
     <p class="photo-name">${escapeHTML(item.name)}</p><div class="photo-controls"><button data-photo-action="up" aria-label="将第 ${index + 1} 张前移" ${index === 0 || state.busy ? 'disabled' : ''}>‹</button><button data-photo-action="down" aria-label="将第 ${index + 1} 张后移" ${index === count - 1 || state.busy ? 'disabled' : ''}>›</button><button data-photo-action="remove" aria-label="移除第 ${index + 1} 张" ${state.busy ? 'disabled' : ''}>×</button></div></article>`).join('');
 }
 $('photoList').addEventListener('click', event => {
@@ -201,19 +237,33 @@ $('photoList').addEventListener('click', event => {
   const action = button.dataset.photoAction;
   if (action === 'edit') return openEditor(state.items[index]);
   if (state.busy) return;
-  if (action === 'remove') { const [item] = state.items.splice(index, 1); URL.revokeObjectURL(item.url); URL.revokeObjectURL(item.thumbnail); item.image.src = ''; }
+  if (action === 'remove') { const [item] = state.items.splice(index, 1); releaseItem(item); }
   else { const next = index + (action === 'up' ? -1 : 1); if (next < 0 || next >= state.items.length) return; [state.items[index], state.items[next]] = [state.items[next], state.items[index]]; }
   renderPhotos(); invalidateResults(0);
 });
 $('clearButton').addEventListener('click', () => {
   if (state.busy) return;
-  for (const item of state.items) { URL.revokeObjectURL(item.url); URL.revokeObjectURL(item.thumbnail); item.image.src = ''; }
+  state.items.forEach(releaseItem);
   state.items = []; renderPhotos(); invalidateResults(0);
 });
 
-function invalidateResults(delay = 180) {
+function resultsCurrent() { return !state.busy && !editing && renderedRevision === state.revision; }
+function markResultsStale() {
   state.revision++; clearTimeout(renderTimer); $('saveAllButton').disabled = true;
-  for (const button of document.querySelectorAll('[data-result-action="save"]')) button.disabled = true;
+  if ($('saveDialog').open) $('saveDialog').close();
+  $('saveImage').removeAttribute('src');
+  for (const button of $('results').querySelectorAll('[data-result-action="save"], [data-result-action="preview"]')) {
+    button.disabled = true;
+    if (button.querySelector('img')) {
+      // Also remove the old image, so a long press cannot save it.
+      button.style.minHeight = `${button.offsetHeight}px`;
+      const label = document.createElement('span'); label.className = 'generating'; label.textContent = '正在更新图片…';
+      button.replaceChildren(label);
+    }
+  }
+}
+function invalidateResults(delay = 180) {
+  markResultsStale();
   if (delay) renderTimer = setTimeout(() => queueRender(), delay); else queueRender();
 }
 function queueRender() {
@@ -222,7 +272,7 @@ function queueRender() {
   state.pendingRender = rendering;
 }
 async function renderResults(revision) {
-  if (revision !== state.revision) return;
+  if (revision !== state.revision || state.busy || editing) return;
   const groups = Math.ceil(state.items.length / 2);
   $('resultsSection').hidden = !state.items.length;
   $('resultCount').textContent = groups;
@@ -232,7 +282,7 @@ async function renderResults(revision) {
   const settings = { ...state.settings };
   const direction = state.stitchDirection, vertical = direction === 'vertical';
   for (let i = 0; i < groups; i++) {
-    if (revision !== state.revision) { next.forEach(freeResult); return; }
+    if (revision !== state.revision || state.busy || editing) { next.forEach(freeResult); return; }
     const left = state.items[i * 2], right = state.items[i * 2 + 1];
     const items = right ? [left, right] : [left];
     const usable = items.every(item => item.status === 'ready' || item.status === 'error' && item.reviewed);
@@ -242,14 +292,15 @@ async function renderResults(revision) {
       next.push({ ...output, left, right, index: i, url: URL.createObjectURL(output.blob), file: new File([output.blob], `${String(i + 1).padStart(2,'0')}-${right ? '收款拼图' : '隐私图片'}.png`, { type: 'image/png' }) });
     } catch (error) { next.push({ left, right, index:i, error: error.message }); }
   }
-  if (revision !== state.revision) { next.forEach(freeResult); return; }
+  if (revision !== state.revision || state.busy || editing) { next.forEach(freeResult); return; }
   state.results.forEach(freeResult); state.results = next;
+  renderedRevision = revision;
   $('results').innerHTML = next.map(result => {
     const masks = [...result.left.masks, ...(result.right?.masks || [])], single = !result.right;
     const cards = masks.filter(m => m.kind === 'card').length, balances = masks.filter(m => m.kind === 'balance').length, manuals = masks.filter(m => m.kind === 'manual').length;
     const description = result.error ? '请先完成识别或手动检查' : masks.length ? [cards ? `尾号 ${cards} 处` : '', balances ? `余额 / 额度 ${balances} 处` : '', manuals ? `补框 ${manuals} 处` : ''].filter(Boolean).join(' · ') : '未发现目标字段，可点照片检查或补框';
     return `<article class="result-card" data-result="${result.index}"><div class="result-heading"><h3>第 ${result.index + 1} ${state.items.length === 1 ? '张' : '组'} <span>${single ? `${result.index * 2 + 1} · 单张处理` : `${result.index * 2 + 1} + ${result.index * 2 + 2}`}</span></h3>${single ? '' : `<button data-result-action="swap" ${state.busy ? 'disabled' : ''}>${vertical ? '⇅ 交换上下' : '⇄ 交换左右'}</button>`}</div>
-      <button class="result-preview" data-result-action="preview" aria-label="放大查看第 ${result.index + 1} 组结果">${result.url ? `<img src="${result.url}" alt="第 ${result.index + 1} 组：已遮挡敏感信息${single ? '' : `、${vertical ? '竖向' : '横向'}拼接`}并添加水印"><span class="preview-zoom">⊕</span>` : `<span class="generating">${escapeHTML(result.error)}</span>`}</button>
+      <button class="result-preview" data-result-action="preview" aria-label="放大查看第 ${result.index + 1} 个处理结果" ${result.url ? '' : 'disabled'}>${result.url ? `<img src="${result.url}" alt="第 ${result.index + 1} 个结果：已遮挡敏感信息${single ? '' : `、${vertical ? '竖向' : '横向'}拼接`}并添加水印"><span class="preview-zoom">⊕</span>` : `<span class="generating">${escapeHTML(result.error)}</span>`}</button>
       <div class="result-info"><p class="mask-summary${!masks.length || result.error ? ' warn' : ''}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2l6 2v5c0 4-6 8-6 8S4 13 4 9V4l6-2Z"/><path d="m7 9 2 2 4-4"/></svg>${description}</p><div class="result-actions"><button class="secondary" data-result-action="left">检查${single ? '图片' : vertical ? '上图' : '左图'}</button>${single ? '' : `<button class="secondary" data-result-action="right">检查${vertical ? '下' : '右'}图</button>`}<button class="primary compact" data-result-action="save" ${result.url ? '' : 'disabled'}>保存图片</button></div>${result.url ? `<p class="result-detail">${result.width} × ${result.height} · PNG${result.resized ? ' · 已适配手机导出尺寸' : ' · 完整画面'}</p>` : ''}</div></article>`;
   }).join('');
   $('saveAllButton').disabled = next.length === 0 || next.some(result => !result.file) || state.busy;
@@ -260,24 +311,38 @@ $('results').addEventListener('click', event => {
   const action = button.dataset.resultAction;
   if (action === 'left' || action === 'right') return openEditor(result[action]);
   if (action === 'swap') { if (state.busy || !result.right) return; const i = result.index * 2; [state.items[i],state.items[i+1]] = [state.items[i+1],state.items[i]]; renderPhotos(); return invalidateResults(0); }
+  if (button.disabled || !resultsCurrent()) return;
   if (action === 'preview' && result.url) return showSave(result);
   if (action === 'save' && result.file) shareFiles([result.file], result);
 });
-function showSave(result) { $('saveImage').src = result.url; $('saveDialog').showModal(); }
-$('closeSave').addEventListener('click', () => { $('saveDialog').close(); $('saveImage').removeAttribute('src'); });
+function showSave(result) {
+  if (!resultsCurrent() || !state.results.includes(result) || !result.url) return;
+  $('saveImage').src = result.url; $('saveDialog').showModal();
+}
+$('closeSave').addEventListener('click', () => $('saveDialog').close());
+$('saveDialog').addEventListener('close', () => $('saveImage').removeAttribute('src'));
 function downloadFile(file) { const url = URL.createObjectURL(file), a = document.createElement('a'); a.href = url; a.download = file.name; document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000); }
 function shareFiles(files, result) {
+  const fallback = () => {
+    if (!resultsCurrent() || result && !state.results.includes(result)) return;
+    if (result) { showSave(result); toast('可长按图片保存到相册。'); }
+    else toast('当前无法一次分享这些图片，请逐组点“保存图片”。');
+  };
   // Files are prepared before this user gesture, as required by iOS Web Share.
-  if (navigator.canShare?.({ files }) && navigator.share) {
-    navigator.share({ files }).catch(error => {
-      if (error.name === 'AbortError') return;
-      if (result) { showSave(result); toast('可长按图片保存到相册。'); }
-      else toast('系统未能分享这批图片，请分别点每组“保存图片”。');
-    });
-  } else if (/iPhone|iPad|iPod/.test(navigator.userAgent) && result) showSave(result);
-  else { for (const file of files) downloadFile(file); toast(files.length > 1 ? '已开始下载；如浏览器拦截多文件，请分别保存。' : '已开始下载图片。'); }
+  try {
+    if (navigator.canShare?.({ files }) && navigator.share) {
+      navigator.share({ files }).catch(error => { if (error?.name !== 'AbortError') fallback(); });
+      return;
+    }
+  } catch (error) { if (error?.name !== 'AbortError') fallback(); return; }
+  if (/iPhone|iPad|iPod/.test(navigator.userAgent) || /Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1) { fallback(); return; }
+  for (const file of files) downloadFile(file);
+  toast(files.length > 1 ? '已开始下载；如浏览器拦截多文件，请分别保存。' : '已开始下载图片。');
 }
-$('saveAllButton').addEventListener('click', () => { const valid = state.results.filter(r => r.file); if (valid.length && !state.busy) shareFiles(valid.map(result => result.file)); });
+$('saveAllButton').addEventListener('click', () => {
+  if (!resultsCurrent() || !state.results.length || state.results.some(result => !result.file)) return;
+  shareFiles(state.results.map(result => result.file), state.results.length === 1 ? state.results[0] : undefined);
+});
 
 function openEditor(item) {
   if (!item) return;
@@ -307,8 +372,10 @@ $('maskStyleOptions').addEventListener('click', event => {
   if (!button || !editing || !['mosaic','solid','smear'].includes(button.dataset.maskStyle)) return;
   editingStyle = state.manualMaskStyle = button.dataset.maskStyle;
   try { localStorage.setItem('receipt-stitch-mask-style', editingStyle); } catch {}
+  const changed = editing.masks.some(mask => mask.kind === 'manual' && mask.style !== editingStyle);
   for (const mask of editing.masks) if (mask.kind === 'manual') mask.style = editingStyle;
-  editing.manualRevision++; writeMaskStyle(); redrawEditor();
+  if (changed) markResultsStale();
+  writeMaskStyle(); redrawEditor();
 });
 function redrawEditor() {
   if (!editing) return;
@@ -321,12 +388,16 @@ function redrawEditor() {
   const availableHeight = Math.max(1, viewport.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom));
   const fitWidth = availableWidth / editing.image.naturalWidth;
   const requestedRatio = zoom === 'fit' ? Math.min(1, fitWidth, availableHeight / editing.image.naturalHeight) : Math.min(1, fitWidth * Number(zoom));
-  canvas.width = Math.max(1, Math.floor(editing.image.naturalWidth * requestedRatio));
-  const ratio = canvas.width / editing.image.naturalWidth;
-  canvas.height = Math.max(1, Math.round(editing.image.naturalHeight * ratio));
-  canvas.style.width = `${canvas.width}px`; canvas.style.height = `${canvas.height}px`;
-  const context = canvas.getContext('2d'); context.drawImage(editing.image, 0, 0, canvas.width, canvas.height); paintMasks(context, editing.masks, ratio, true);
-  if (drawing) { context.strokeStyle = '#ef913c'; context.lineWidth = 2; context.setLineDash([5,3]); context.strokeRect(drawing.x * ratio, drawing.y * ratio, (drawing.endX - drawing.x) * ratio, (drawing.endY - drawing.y) * ratio); }
+  const width = Math.max(1, Math.floor(editing.image.naturalWidth * requestedRatio));
+  const height = Math.max(1, Math.round(editing.image.naturalHeight * (zoom === 'fit' ? requestedRatio : width / editing.image.naturalWidth)));
+  const raster = boundedImageSize(width, height);
+  canvas.width = raster.width; canvas.height = raster.height;
+  canvas.style.width = `${width}px`; canvas.style.height = `${height}px`;
+  const context = canvas.getContext('2d');
+  if (!context) { toast('暂时无法显示此图，请退出检查后重试。'); return; }
+  const scaleX = canvas.width / editing.image.naturalWidth, scaleY = canvas.height / editing.image.naturalHeight;
+  context.drawImage(editing.image, 0, 0, canvas.width, canvas.height); paintMasks(context, editing.masks, scaleX, true, scaleY);
+  if (drawing) { context.strokeStyle = '#ef913c'; context.lineWidth = 2; context.setLineDash([5,3]); context.strokeRect(drawing.x * scaleX, drawing.y * scaleY, (drawing.endX - drawing.x) * scaleX, (drawing.endY - drawing.y) * scaleY); }
   if (zoom === 'fit') viewport.scrollTo(0, 0);
   updateEditorScrollbar();
 }
@@ -363,7 +434,10 @@ function endEditorPointer(event) {
   if (!editorPointers.has(event.pointerId)) return;
   if (event.type === 'pointerup' && editing && editorGesture === 'draw' && drawing) {
     const point = editorPoint(event), x = Math.min(drawing.x, point.x), y = Math.min(drawing.y, point.y), width = Math.abs(point.x - drawing.x), height = Math.abs(point.y - drawing.y);
-    if (width >= 7 && height >= 7) { editing.masks.push({ x:Math.floor(x), y:Math.floor(y), width:Math.ceil(width), height:Math.ceil(height), kind:'manual', source:'manual', style:editingStyle }); editing.manualRevision++; }
+    if (width >= 7 && height >= 7) {
+      editing.masks.push({ x:Math.floor(x), y:Math.floor(y), width:Math.ceil(x + width) - Math.floor(x), height:Math.ceil(y + height) - Math.floor(y), kind:'manual', source:'manual', style:editingStyle });
+      markResultsStale();
+    }
   }
   drawing = null; editorPointers.delete(event.pointerId);
   // Keep a two-finger gesture in pan mode until every finger is lifted.
@@ -404,9 +478,12 @@ $('editorScrollbar').addEventListener('keydown', event => {
   const targets = { ArrowDown: viewport.scrollTop + 40, ArrowUp: viewport.scrollTop - 40, PageDown: viewport.scrollTop + viewport.clientHeight * .85, PageUp: viewport.scrollTop - viewport.clientHeight * .85, Home: 0, End: maximum };
   if (event.key in targets) { event.preventDefault(); viewport.scrollTop = targets[event.key]; updateEditorScrollbar(); }
 });
-$('maskList').addEventListener('click', event => { const button = event.target.closest('[data-mask-index]'); if (!button || !editing) return; editing.masks.splice(Number(button.dataset.maskIndex),1); editing.manualRevision++; redrawEditor(); });
-$('undoMask').addEventListener('click', () => { if (!editing) return; const index = editing.masks.findLastIndex(mask => mask.source === 'manual'); if (index >= 0) { editing.masks.splice(index,1); editing.manualRevision++; redrawEditor(); } });
-$('closeEditor').addEventListener('click', () => { if (editing) editing.reviewed = true; $('editor').close(); });
+$('maskList').addEventListener('click', event => { const button = event.target.closest('[data-mask-index]'); if (!button || !editing) return; editing.masks.splice(Number(button.dataset.maskIndex),1); markResultsStale(); redrawEditor(); });
+$('undoMask').addEventListener('click', () => { if (!editing) return; const index = editing.masks.findLastIndex(mask => mask.source === 'manual'); if (index >= 0) { editing.masks.splice(index,1); markResultsStale(); redrawEditor(); } });
+$('closeEditor').addEventListener('click', () => {
+  if (editing && !editing.reviewed) { editing.reviewed = true; if (editing.status === 'error') markResultsStale(); }
+  $('editor').close();
+});
 $('editor').addEventListener('close', async () => {
   const item = editing; resetEditorGesture(); scrollbarDrag = null; editing = null;
   document.body.classList.remove('editor-page-locked');
@@ -414,7 +491,9 @@ $('editor').addEventListener('close', async () => {
   const restoreScroll = editorPageScroll; editorPageScroll = null;
   if (restoreScroll) window.scrollTo(restoreScroll.x, restoreScroll.y);
   if (!item) return;
-  await refreshThumbnail(item); renderPhotos(); invalidateResults(0); await state.pendingRender;
+  await refreshThumbnail(item); renderPhotos();
+  if (renderedRevision !== state.revision && !state.busy && !editing) invalidateResults(0);
+  await state.pendingRender;
   if (!editing) $('editorCanvas').width = $('editorCanvas').height = 1;
   // Replacing the result cards can move WebKit's scroll anchor after the dialog closes.
   if (restoreScroll && !editing) {

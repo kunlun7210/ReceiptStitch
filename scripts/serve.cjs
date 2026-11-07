@@ -3,9 +3,11 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const root = path.resolve(__dirname, '../dist');
 const fixtures = process.env.SAMPLE_DIR || path.resolve(__dirname, '../../fixtures');
-const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript', '.mjs':'text/javascript', '.json':'application/json', '.css':'text/css', '.png':'image/png', '.svg':'image/svg+xml', '.wasm':'application/wasm', '.jpg':'image/jpeg', '.tar':'application/octet-stream' };
+const types = { '.html':'text/html; charset=utf-8', '.js':'text/javascript', '.mjs':'text/javascript', '.json':'application/json', '.webmanifest':'application/manifest+json', '.css':'text/css', '.png':'image/png', '.svg':'image/svg+xml', '.wasm':'application/wasm', '.jpg':'image/jpeg', '.tar':'application/octet-stream' };
 function createServer({basePath = '/'} = {}) { return http.createServer(async (req, res) => {
-  let pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+  let pathname;
+  try { pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname); }
+  catch { return res.writeHead(400).end(); }
   if (basePath !== '/') {
     if (pathname === basePath.slice(0,-1)) return res.writeHead(301,{Location:basePath}).end();
     if (!pathname.startsWith(basePath)) return res.writeHead(404).end();
