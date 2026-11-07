@@ -1,14 +1,15 @@
-import { DEFAULTS, COMMON_COLORS, PALETTE, detectSensitive, paintMasks, composePair, makeThumbnail, boundedImageSize } from './processing.js';
+import { DEFAULTS, COMMON_COLORS, PALETTE, detectSensitive, paintMasks, composeCollage, decodePhoto, makeThumbnail, boundedImageSize } from './processing.js';
 import { scanImage, prepareOCR, ocrCacheStatus, registerAppWorker } from './ocr.js';
 
 const $ = id => document.getElementById(id);
-export const state = { items: [], results: [], busy: false, settings: { ...DEFAULTS }, stitchDirection: 'horizontal', manualMaskStyle: 'mosaic', sequence: 0, revision: 0, pending: Promise.resolve() };
+export const state = { items: [], results: [], busy: false, settings: { ...DEFAULTS }, stitchDirection: 'horizontal', groupMode: 'all', manualMaskStyle: 'mosaic', sequence: 0, revision: 0, pending: Promise.resolve() };
 let toastTimer, renderTimer, rendering = Promise.resolve(), editing = null, drawing = null, drawEnabled = true, editingStyle = 'mosaic';
-let renderedRevision = -1;
+let renderedRevision = -1, groupSequence = 0, editorImage = null, openingEditor = false;
 const editorPointers = new Map();
 let editorGesture = null, editorPanAnchor = null, scrollbarDrag = null, editorPageScroll = null;
 let modelPreparation = null, modelPhase = 'idle';
 const labels = { card: '卡尾号', balance: '可用余额 / 额度', manual: '手动遮挡' };
+const layoutNames = { horizontal: '横向拼接', vertical: '竖向拼接', 'grid-2': '双列网格', 'grid-3': '三列网格' };
 const colorChoices = [...COMMON_COLORS, ...PALETTE];
 const colorName = color => colorChoices.find(([value]) => value === color)?.[1] || '浅灰';
 
@@ -20,7 +21,10 @@ try {
     transparency: Math.min(95, Math.max(0, Number(saved.transparency) || 0)),
   };
 } catch {}
-try { if (localStorage.getItem('receipt-stitch-layout') === 'vertical') state.stitchDirection = 'vertical'; } catch {}
+try {
+  const layout = localStorage.getItem('receipt-stitch-layout');
+  if (Object.hasOwn(layoutNames, layout)) state.stitchDirection = layout;
+} catch {}
 try { const style = localStorage.getItem('receipt-stitch-mask-style'); if (['mosaic','solid','smear'].includes(style)) state.manualMaskStyle = style; } catch {}
 writeSettings();
 writeStitchSettings();
@@ -89,17 +93,12 @@ $('fontSize').addEventListener('change', () => $('fontSize').value = state.setti
 $('resetSettings').addEventListener('click', () => { state.settings = { ...DEFAULTS }; writeSettings(); readSettings(); });
 
 function writeStitchSettings() {
-  const vertical = state.stitchDirection === 'vertical';
   document.querySelector(`input[name="stitchDirection"][value="${state.stitchDirection}"]`).checked = true;
-  $('stitchSummary').textContent = vertical ? '竖向拼接 · 第一张在上' : '横向拼接 · 第一张在左';
-  $('stitchStep').textContent = '拼接';
-  $('uploadOrderHint').textContent = `按选择顺序${vertical ? '上下' : '左右'}排列`;
-  $('photoOrderHint').textContent = `单张可直接处理；多张按选择顺序${vertical ? '上下' : '左右'}排列，可调整顺序`;
-  $('stitchHint').textContent = `单张图片直接打码加水印；两张图片按同${vertical ? '宽' : '高'}拼接，保留完整画面。`;
+  $('stitchSummary').textContent = layoutNames[state.stitchDirection];
 }
 $('stitchSettings').addEventListener('change', event => {
-  if (event.target.name !== 'stitchDirection') return;
-  state.stitchDirection = event.target.value === 'vertical' ? 'vertical' : 'horizontal';
+  if (event.target.name !== 'stitchDirection' || !Object.hasOwn(layoutNames, event.target.value)) return;
+  state.stitchDirection = event.target.value;
   try { localStorage.setItem('receipt-stitch-layout', state.stitchDirection); } catch {}
   writeStitchSettings(); invalidateResults(0);
 });
@@ -111,38 +110,39 @@ for (const name of ['dragenter','dragover']) $('dropZone').addEventListener(name
 for (const name of ['dragleave','drop']) $('dropZone').addEventListener(name, event => { event.preventDefault(); $('dropZone').classList.remove('dragging'); });
 $('dropZone').addEventListener('drop', event => { state.pending = importFiles(Array.from(event.dataTransfer.files)); });
 
-async function loadImage(file) {
-  const url = URL.createObjectURL(file), image = new Image();
-  try { image.src = url; await image.decode(); }
-  catch { URL.revokeObjectURL(url); throw new Error(`${file.name} 无法读取。请在相册中转为 PNG 或 JPEG 后重试。`); }
-  if (!image.naturalWidth || !image.naturalHeight) { URL.revokeObjectURL(url); throw new Error(`${file.name} 没有有效的图像尺寸。`); }
-  return { image, url };
-}
 async function importFiles(files) {
   if (state.busy) { toast('正在处理这一批，请完成后再添加照片。'); return; }
   if (!files.length) return toast('请选择相册中的图片。');
   const unsupported = files.find(file => !file.type.startsWith('image/') && !/\.(png|jpe?g|webp|heic|heif|gif|avif|bmp)$/i.test(file.name));
   if (unsupported) return toast(`${unsupported.name} 不是可读取的图片，本批未添加。`);
-  if (state.items.length + files.length > 20) return toast('一次最多 20 张照片，可先保存再处理下一批。');
   setProcessing(true); markResultsStale();
-  status('正在读取照片', '按你的选择顺序排列');
+  renderPhotos();
+  status('正在读取照片', `0 / ${files.length}`);
   const batch = [];
   try {
-    // Commit only a complete selection so a failed decode cannot shift pairs.
+    // Commit only a complete selection so a failed decode cannot change groups.
     for (const file of files) {
-      const { image, url } = await loadImage(file);
-      const item = { id: ++state.sequence, name: file.name, image, url, thumbnail: null, thumbnailRevision: 0, masks: [], status: 'pending', reviewed: false };
+      const item = { id: ++state.sequence, name: file.name, url: URL.createObjectURL(file), thumbnail: null, thumbnailRevision: 0, masks: [], status: 'pending', reviewed: false };
       batch.push(item);
-      item.thumbnail = await makeThumbnail(item).catch(() => null);
+      const image = await decodePhoto(item);
+      try {
+        item.width = image.naturalWidth; item.height = image.naturalHeight;
+        item.thumbnail = await makeThumbnail(item, image).catch(() => null);
+      } finally { image.removeAttribute('src'); }
+      status('正在读取照片', `${batch.length} / ${files.length}`);
     }
   } catch (error) {
     batch.forEach(releaseItem);
     setProcessing(false); renderPhotos(); invalidateResults(0);
-    const message = `${error.message} 本批未添加，原配对顺序保留。`;
+    const message = `${error.message} 本批未添加，原分组保留。`;
     status('读取图片失败', message, true); toast(message);
     return;
   }
-  state.items.push(...batch);
+  if (state.groupMode === 'custom' || state.items.some(item => item.group)) {
+    const group = ++groupSequence;
+    for (const item of batch) item.group = group;
+  }
+  state.items = state.items.concat(batch);
   renderPhotos();
   return analyzePending();
 }
@@ -154,16 +154,18 @@ function setProcessing(busy) {
 }
 
 async function analyzePending() {
-  if (!state.busy) { setProcessing(true); markResultsStale(); }
+  if (!state.busy) { setProcessing(true); markResultsStale(); renderPhotos(); }
   $('progress').hidden = false; $('progress').value = 0; $('retryButton').hidden = true;
   const targets = state.items.filter(item => item.status === 'pending' || item.status === 'error');
   let completed = 0;
   try {
     for (const item of targets) {
-      item.status = 'processing'; renderPhotos();
+      item.status = 'processing'; updatePhotoTile(item);
+      let image;
       try {
         status(`正在识别 ${completed + 1} / ${targets.length}`, item.name);
-        const lines = await scanImage(item.image, (message, info) => {
+        image = await decodePhoto(item);
+        const lines = await scanImage(image, (message, info) => {
           if (info?.phase !== 'recognizing') showModelPreparation(message, info);
           if (info?.phase === 'recognizing') {
             status(`正在识别 ${completed + 1} / ${targets.length}`, item.name);
@@ -176,23 +178,27 @@ async function analyzePending() {
             else $('progress').removeAttribute('value');
           }
         });
-        const automatic = detectSensitive(lines, item.image.naturalWidth, item.image.naturalHeight, item.image);
+        const automatic = detectSensitive(lines, item.width, item.height, image);
         // Keep manual selections made while inference was running.
         item.masks = [...automatic, ...item.masks.filter(m => m.source === 'manual')];
         item.status = 'ready'; updateOfflineStatus();
         if (item === editing) redrawEditor();
       } catch (error) {
         item.status = 'error'; item.error = /下载|联网|读取|校验|HTTPS|启动|超时/.test(error.message) ? error.message : '本地识别暂未完成，请重试。';
-        if (modelPhase !== 'ready') {
+        if (image && modelPhase !== 'ready') {
           showModelError(error);
           // A shared setup failure cannot be fixed by running the remaining photos.
           for (const rest of targets.slice(completed + 1)) { rest.status = 'error'; rest.error = item.error; }
           break;
         }
+      } finally {
+        if (image) {
+          try { await refreshThumbnail(item, image); }
+          finally { image.removeAttribute('src'); }
+        }
       }
-      await refreshThumbnail(item);
       $('progress').value = ++completed / targets.length;
-      renderPhotos();
+      updatePhotoTile(item);
       await new Promise(resolve => setTimeout(resolve, 0));
     }
   } finally {
@@ -211,11 +217,10 @@ $('retryButton').addEventListener('click', () => { if (!state.busy) state.pendin
 function releaseItem(item) {
   URL.revokeObjectURL(item.url);
   if (item.thumbnail) URL.revokeObjectURL(item.thumbnail);
-  item.image.removeAttribute('src');
 }
-async function refreshThumbnail(item) {
+async function refreshThumbnail(item, image) {
   const revision = ++item.thumbnailRevision;
-  const next = await makeThumbnail(item).catch(() => null);
+  const next = await makeThumbnail(item, image).catch(() => null);
   if (revision !== item.thumbnailRevision || !state.items.includes(item)) {
     if (next) URL.revokeObjectURL(next);
     return;
@@ -223,17 +228,92 @@ async function refreshThumbnail(item) {
   if (item.thumbnail) URL.revokeObjectURL(item.thumbnail);
   item.thumbnail = next;
 }
+
+function photoGroups() {
+  if (!state.items.length) return [];
+  if (state.groupMode === 'all') return [state.items.slice()];
+  if (state.groupMode === 'single') return state.items.map(item => [item]);
+  const groups = new Map();
+  for (const item of state.items) {
+    if (!groups.has(item.group)) groups.set(item.group, []);
+    groups.get(item.group).push(item);
+  }
+  return [...groups.entries()].sort(([a], [b]) => a - b).map(([, items]) => items);
+}
+
+$('groupOptions').addEventListener('change', event => {
+  if (state.busy || event.target.name !== 'groupMode') return;
+  const mode = event.target.value;
+  if (!['all', 'single', 'custom'].includes(mode) || mode === state.groupMode) return;
+  if (mode === 'custom' && !state.items.some(item => item.group)) {
+    for (const group of photoGroups()) {
+      const id = ++groupSequence;
+      for (const item of group) item.group = id;
+    }
+  }
+  state.groupMode = mode;
+  renderPhotos(); invalidateResults(0);
+});
+
+function photoTile(item, number) {
+  const pending = item.status === 'pending' || item.status === 'processing';
+  const failed = item.status === 'error' && !item.reviewed;
+  const badge = item.status === 'ready' || item.reviewed ? '✓' : failed ? '!' : '…';
+  const media = item.thumbnail
+    ? `<img src="${item.thumbnail}" loading="lazy" decoding="async" alt="${escapeHTML(item.name)}">`
+    : '<span>点此检查图片</span>';
+  return `${media}<span class="photo-number">${number}</span><span class="photo-state${pending ? ' pending' : failed ? ' failed' : ''}">${badge}</span>`;
+}
+
+function updatePhotoTile(item) {
+  const figure = $(`photo-${item.id}`)?.querySelector('.photo-figure');
+  if (figure) figure.innerHTML = photoTile(item, figure.querySelector('.photo-number').textContent);
+}
+
+function photoGroupPicker(item, number, groups) {
+  const options = groups.map((group, index) => {
+    const id = group[0].group;
+    return `<option value="${id}" ${id === item.group ? 'selected' : ''}>第 ${index + 1} 组</option>`;
+  });
+  if (groups.some(group => group[0].group === item.group && group.length > 1)) {
+    options.push('<option value="new">＋ 新建一组</option>');
+  }
+  return `<label class="photo-group"><select data-photo-group aria-label="第 ${number} 张照片所属组" ${state.busy ? 'disabled' : ''}>${options.join('')}</select></label>`;
+}
+
 function renderPhotos() {
   const count = state.items.length;
-  $('workbench').hidden = !count; $('dropZone').hidden = count > 0; $('photoCount').textContent = count;
+  $('workbench').hidden = !count && !state.busy; $('dropZone').hidden = count > 0 || state.busy; $('photoCount').textContent = count;
   $('clearButton').disabled = state.busy;
-  $('photoList').innerHTML = state.items.map((item, index) => `<article class="photo-item" data-id="${item.id}">
-    <button class="photo-figure" data-photo-action="edit" aria-label="检查第 ${index + 1} 张照片的遮挡">${item.thumbnail ? `<img src="${item.thumbnail}" alt="${escapeHTML(item.name)}">` : '<span>点此检查图片</span>'}<span class="photo-number">${index + 1}</span><span class="photo-state${['pending','processing'].includes(item.status) ? ' pending' : item.status === 'error' && !item.reviewed ? ' failed' : ''}">${item.status === 'ready' || item.reviewed ? '✓' : item.status === 'error' ? '!' : '…'}</span></button>
-    <p class="photo-name">${escapeHTML(item.name)}</p><div class="photo-controls"><button data-photo-action="up" aria-label="将第 ${index + 1} 张前移" ${index === 0 || state.busy ? 'disabled' : ''}>‹</button><button data-photo-action="down" aria-label="将第 ${index + 1} 张后移" ${index === count - 1 || state.busy ? 'disabled' : ''}>›</button><button data-photo-action="remove" aria-label="移除第 ${index + 1} 张" ${state.busy ? 'disabled' : ''}>×</button></div></article>`).join('');
+  $('groupOptions').hidden = count < 2;
+  $('groupOptions').disabled = state.busy;
+  $('groupOptions').querySelector(`input[value="${state.groupMode}"]`).checked = true;
+  const custom = state.groupMode === 'custom' && count > 1;
+  const groups = custom ? photoGroups() : [];
+  $('groupHint').hidden = !custom;
+  if (custom) $('groupHint').textContent = `共 ${groups.length} 组 · 在照片下方选择组别，同一组会拼成一张。`;
+  $('photoList').innerHTML = state.items.map((item, index) => `<article class="photo-item" id="photo-${item.id}" data-id="${item.id}">
+    <button class="photo-figure" data-photo-action="edit" aria-label="检查第 ${index + 1} 张照片的遮挡">${photoTile(item, index + 1)}</button>
+    <p class="photo-name">${escapeHTML(item.name)}</p>
+    ${custom ? photoGroupPicker(item, index + 1, groups) : ''}
+    <div class="photo-controls"><button data-photo-action="up" aria-label="将第 ${index + 1} 张前移" ${index === 0 || state.busy ? 'disabled' : ''}>‹</button><button data-photo-action="down" aria-label="将第 ${index + 1} 张后移" ${index === count - 1 || state.busy ? 'disabled' : ''}>›</button><button data-photo-action="remove" aria-label="移除第 ${index + 1} 张" ${state.busy ? 'disabled' : ''}>×</button></div></article>`).join('');
 }
+$('photoList').addEventListener('change', event => {
+  const select = event.target.closest('[data-photo-group]');
+  if (!select || state.busy || state.groupMode !== 'custom') return;
+  const item = state.items.find(photo => photo.id === Number(select.closest('[data-id]').dataset.id));
+  if (!item) return;
+  const group = select.value === 'new' ? ++groupSequence : Number(select.value);
+  if (!Number.isInteger(group) || group === item.group) return;
+  const hadFocus = document.activeElement === select;
+  item.group = group;
+  renderPhotos(); invalidateResults(0);
+  if (hadFocus) $(`photo-${item.id}`).querySelector('[data-photo-group]').focus({ preventScroll: true });
+});
 $('photoList').addEventListener('click', event => {
   const button = event.target.closest('[data-photo-action]'); if (!button) return;
   const index = state.items.findIndex(item => item.id === Number(button.closest('[data-id]').dataset.id));
+  if (index < 0) return;
   const action = button.dataset.photoAction;
   if (action === 'edit') return openEditor(state.items[index]);
   if (state.busy) return;
@@ -252,13 +332,13 @@ function markResultsStale() {
   state.revision++; clearTimeout(renderTimer); $('saveAllButton').disabled = true;
   if ($('saveDialog').open) $('saveDialog').close();
   $('saveImage').removeAttribute('src');
-  for (const button of $('results').querySelectorAll('[data-result-action="save"], [data-result-action="preview"]')) {
-    button.disabled = true;
-    if (button.querySelector('img')) {
+  for (const control of $('results').querySelectorAll('[data-result-action]')) {
+    control.disabled = true;
+    if (control.querySelector('img')) {
       // Also remove the old image, so a long press cannot save it.
-      button.style.minHeight = `${button.offsetHeight}px`;
+      control.style.minHeight = `${control.offsetHeight}px`;
       const label = document.createElement('span'); label.className = 'generating'; label.textContent = '正在更新图片…';
-      button.replaceChildren(label);
+      control.replaceChildren(label);
     }
   }
 }
@@ -272,48 +352,95 @@ function queueRender() {
   state.pendingRender = rendering;
 }
 async function renderResults(revision) {
-  if (revision !== state.revision || state.busy || editing) return;
-  const groups = Math.ceil(state.items.length / 2);
-  $('resultsSection').hidden = !state.items.length;
-  $('resultCount').textContent = groups;
-  $('pairHint').hidden = state.items.length < 3 || state.items.length % 2 === 0;
-  $('pairHint').textContent = '最后 1 张将单独打码并加水印，也可继续添加图片进行拼接。';
+  const current = () => revision === state.revision && !state.busy && !editing;
+  if (!current()) return;
+  const groups = photoGroups();
   const next = [];
   const settings = { ...state.settings };
-  const direction = state.stitchDirection, vertical = direction === 'vertical';
-  for (let i = 0; i < groups; i++) {
-    if (revision !== state.revision || state.busy || editing) { next.forEach(freeResult); return; }
-    const left = state.items[i * 2], right = state.items[i * 2 + 1];
-    const items = right ? [left, right] : [left];
-    const usable = items.every(item => item.status === 'ready' || item.status === 'error' && item.reviewed);
-    if (!usable) { next.push({ left, right, index: i, error: items.some(item => item.status === 'error') ? '识别未完成，请重试或逐张手动检查图片。' : '正在识别图片，完成后自动生成…' }); continue; }
+  const layout = state.stitchDirection;
+  for (const [index, photos] of groups.entries()) {
+    if (!current()) return next.forEach(freeResult);
+    const result = { photos, index, layout };
+    if (photos.some(photo => photo.status !== 'ready' && !(photo.status === 'error' && photo.reviewed))) {
+      result.error = '识别未完成，请重试或逐张手动检查图片。';
+      next.push(result);
+      continue;
+    }
     try {
-      const output = await composePair(left, right, settings, direction);
-      next.push({ ...output, left, right, index: i, url: URL.createObjectURL(output.blob), file: new File([output.blob], `${String(i + 1).padStart(2,'0')}-${right ? '收款拼图' : '隐私图片'}.png`, { type: 'image/png' }) });
-    } catch (error) { next.push({ left, right, index:i, error: error.message }); }
+      const output = await composeCollage(photos, settings, layout, current);
+      if (!output || !current()) return next.forEach(freeResult);
+      const name = `${String(index + 1).padStart(2,'0')}-${photos.length > 1 ? '收款拼图' : '隐私图片'}.png`;
+      Object.assign(result, output, { file: new File([output.blob], name, { type: 'image/png' }), url: URL.createObjectURL(output.blob) });
+    } catch (error) { result.error = error.message; }
+    next.push(result);
   }
-  if (revision !== state.revision || state.busy || editing) { next.forEach(freeResult); return; }
+  if (!current()) return next.forEach(freeResult);
   state.results.forEach(freeResult); state.results = next;
   renderedRevision = revision;
-  $('results').innerHTML = next.map(result => {
-    const masks = [...result.left.masks, ...(result.right?.masks || [])], single = !result.right;
-    const cards = masks.filter(m => m.kind === 'card').length, balances = masks.filter(m => m.kind === 'balance').length, manuals = masks.filter(m => m.kind === 'manual').length;
-    const description = result.error ? '请先完成识别或手动检查' : masks.length ? [cards ? `尾号 ${cards} 处` : '', balances ? `余额 / 额度 ${balances} 处` : '', manuals ? `补框 ${manuals} 处` : ''].filter(Boolean).join(' · ') : '未发现目标字段，可点照片检查或补框';
-    return `<article class="result-card" data-result="${result.index}"><div class="result-heading"><h3>第 ${result.index + 1} ${state.items.length === 1 ? '张' : '组'} <span>${single ? `${result.index * 2 + 1} · 单张处理` : `${result.index * 2 + 1} + ${result.index * 2 + 2}`}</span></h3>${single ? '' : `<button data-result-action="swap" ${state.busy ? 'disabled' : ''}>${vertical ? '⇅ 交换上下' : '⇄ 交换左右'}</button>`}</div>
-      <button class="result-preview" data-result-action="preview" aria-label="放大查看第 ${result.index + 1} 个处理结果" ${result.url ? '' : 'disabled'}>${result.url ? `<img src="${result.url}" alt="第 ${result.index + 1} 个结果：已遮挡敏感信息${single ? '' : `、${vertical ? '竖向' : '横向'}拼接`}并添加水印"><span class="preview-zoom">⊕</span>` : `<span class="generating">${escapeHTML(result.error)}</span>`}</button>
-      <div class="result-info"><p class="mask-summary${!masks.length || result.error ? ' warn' : ''}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2l6 2v5c0 4-6 8-6 8S4 13 4 9V4l6-2Z"/><path d="m7 9 2 2 4-4"/></svg>${description}</p><div class="result-actions"><button class="secondary" data-result-action="left">检查${single ? '图片' : vertical ? '上图' : '左图'}</button>${single ? '' : `<button class="secondary" data-result-action="right">检查${vertical ? '下' : '右'}图</button>`}<button class="primary compact" data-result-action="save" ${result.url ? '' : 'disabled'}>保存图片</button></div>${result.url ? `<p class="result-detail">${result.width} × ${result.height} · PNG${result.resized ? ' · 已适配手机导出尺寸' : ' · 完整画面'}</p>` : ''}</div></article>`;
-  }).join('');
+  $('resultsSection').hidden = !next.length;
+  $('resultCount').textContent = next.length;
+  const numbers = new Map(state.items.map((item, index) => [item.id, index + 1]));
+  $('results').innerHTML = next.map(result => resultCard(result, numbers)).join('');
   $('saveAllButton').disabled = next.length === 0 || next.some(result => !result.file) || state.busy;
 }
+
+function resultCard(result, numbers) {
+  const { photos, index, layout, url, error } = result;
+  const single = photos.length === 1, pair = photos.length === 2, vertical = layout === 'vertical';
+  const number = index + 1;
+  const caption = single ? `照片 ${numbers.get(photos[0].id)} · 单张处理` : `${photos.length} 张 · ${layoutNames[layout]}`;
+  const masks = photos.flatMap(photo => photo.masks);
+  const counts = { card: 0, balance: 0, manual: 0 };
+  for (const mask of masks) counts[mask.kind]++;
+  const description = error ? '暂未生成成品' : masks.length ? [
+    counts.card && `尾号 ${counts.card} 处`,
+    counts.balance && `余额 / 额度 ${counts.balance} 处`,
+    counts.manual && `补框 ${counts.manual} 处`,
+  ].filter(Boolean).join(' · ') : '未发现目标字段，可点照片检查或补框';
+
+  const checks = single || pair
+    ? `<button class="secondary" data-result-action="left">检查${single ? '图片' : vertical ? '上图' : '左图'}</button>
+       ${pair ? `<button class="secondary" data-result-action="right">检查${vertical ? '下' : '右'}图</button>` : ''}`
+    : `<select class="result-check" data-result-action="check" aria-label="检查第 ${number} 个结果的照片">
+         <option value="">检查照片</option>${photos.map(photo => `<option value="${photo.id}">第 ${numbers.get(photo.id)} 张 · ${escapeHTML(photo.name)}</option>`).join('')}
+       </select>`;
+  return `<article class="result-card" data-result="${index}">
+    <div class="result-heading">
+      <h3>第 ${number} ${single && state.groupMode !== 'custom' ? '张' : '组'} <span>${caption}</span></h3>
+      ${pair ? `<button data-result-action="swap">${vertical ? '⇅ 交换上下' : '⇄ 交换左右'}</button>` : ''}
+    </div>
+    <button class="result-preview" data-result-action="preview" aria-label="放大查看第 ${number} 个处理结果" ${url ? '' : 'disabled'}>
+      ${url ? `<img src="${url}" loading="lazy" decoding="async" alt="第 ${number} 个处理结果"><span class="preview-zoom">⊕</span>` : `<span class="generating">${escapeHTML(error)}</span>`}
+    </button>
+    <div class="result-info">
+      <p class="mask-summary${!masks.length || error ? ' warn' : ''}"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 2l6 2v5c0 4-6 8-6 8S4 13 4 9V4l6-2Z"/><path d="m7 9 2 2 4-4"/></svg>${description}</p>
+      <div class="result-actions">${checks}<button class="primary compact" data-result-action="save" ${url ? '' : 'disabled'}>保存图片</button></div>
+      ${url ? `<p class="result-detail">${result.width} × ${result.height} · PNG${result.resized ? ' · 已适配手机导出尺寸' : ' · 完整画面'}</p>` : ''}
+    </div>
+  </article>`;
+}
+
 $('results').addEventListener('click', event => {
-  const button = event.target.closest('[data-result-action]'); if (!button) return;
+  const button = event.target.closest('button[data-result-action]');
+  if (!button || button.disabled || !resultsCurrent()) return;
   const result = state.results[Number(button.closest('[data-result]').dataset.result)]; if (!result) return;
   const action = button.dataset.resultAction;
-  if (action === 'left' || action === 'right') return openEditor(result[action]);
-  if (action === 'swap') { if (state.busy || !result.right) return; const i = result.index * 2; [state.items[i],state.items[i+1]] = [state.items[i+1],state.items[i]]; renderPhotos(); return invalidateResults(0); }
-  if (button.disabled || !resultsCurrent()) return;
+  if (action === 'left' || action === 'right') return openEditor(result.photos[action === 'left' ? 0 : 1]);
+  if (action === 'swap' && result.photos.length === 2) {
+    const [left, right] = result.photos.map(photo => state.items.indexOf(photo));
+    [state.items[left], state.items[right]] = [state.items[right], state.items[left]];
+    renderPhotos(); return invalidateResults(0);
+  }
   if (action === 'preview' && result.url) return showSave(result);
   if (action === 'save' && result.file) shareFiles([result.file], result);
+});
+$('results').addEventListener('change', event => {
+  const select = event.target.closest('select[data-result-action="check"]');
+  if (!select || !select.value || !resultsCurrent()) return;
+  const result = state.results[Number(select.closest('[data-result]').dataset.result)];
+  const photo = result?.photos.find(item => item.id === Number(select.value));
+  select.value = '';
+  openEditor(photo);
 });
 function showSave(result) {
   if (!resultsCurrent() || !state.results.includes(result) || !result.url) return;
@@ -326,7 +453,7 @@ function shareFiles(files, result) {
   const fallback = () => {
     if (!resultsCurrent() || result && !state.results.includes(result)) return;
     if (result) { showSave(result); toast('可长按图片保存到相册。'); }
-    else toast('当前无法一次分享这些图片，请逐组点“保存图片”。');
+    else toast('当前无法一次分享这些图片，请分别点“保存图片”。');
   };
   // Files are prepared before this user gesture, as required by iOS Web Share.
   try {
@@ -344,9 +471,15 @@ $('saveAllButton').addEventListener('click', () => {
   shareFiles(state.results.map(result => result.file), state.results.length === 1 ? state.results[0] : undefined);
 });
 
-function openEditor(item) {
-  if (!item) return;
-  resetEditorGesture(); editing = item; $('editorZoom').value = '1'; setDrawMode(true);
+async function openEditor(item) {
+  if (!item || editing || openingEditor) return;
+  openingEditor = true;
+  let image;
+  try { image = await decodePhoto(item); }
+  catch (error) { toast(error.message); return; }
+  finally { openingEditor = false; }
+  if (!state.items.includes(item)) { image.removeAttribute('src'); return; }
+  resetEditorGesture(); editing = item; editorImage = image; $('editorZoom').value = '1'; setDrawMode(true);
   const previous = item.masks.filter(mask => mask.kind === 'manual').at(-1);
   editingStyle = previous ? previous.style || 'mosaic' : state.manualMaskStyle;
   writeMaskStyle();
@@ -386,22 +519,22 @@ function redrawEditor() {
   const padding = getComputedStyle(viewport), zoom = $('editorZoom').value;
   const availableWidth = Math.max(1, viewport.clientWidth - parseFloat(padding.paddingLeft) - parseFloat(padding.paddingRight));
   const availableHeight = Math.max(1, viewport.clientHeight - parseFloat(padding.paddingTop) - parseFloat(padding.paddingBottom));
-  const fitWidth = availableWidth / editing.image.naturalWidth;
-  const requestedRatio = zoom === 'fit' ? Math.min(1, fitWidth, availableHeight / editing.image.naturalHeight) : Math.min(1, fitWidth * Number(zoom));
-  const width = Math.max(1, Math.floor(editing.image.naturalWidth * requestedRatio));
-  const height = Math.max(1, Math.round(editing.image.naturalHeight * (zoom === 'fit' ? requestedRatio : width / editing.image.naturalWidth)));
+  const fitWidth = availableWidth / editing.width;
+  const requestedRatio = zoom === 'fit' ? Math.min(1, fitWidth, availableHeight / editing.height) : Math.min(1, fitWidth * Number(zoom));
+  const width = Math.max(1, Math.floor(editing.width * requestedRatio));
+  const height = Math.max(1, Math.round(editing.height * (zoom === 'fit' ? requestedRatio : width / editing.width)));
   const raster = boundedImageSize(width, height);
   canvas.width = raster.width; canvas.height = raster.height;
   canvas.style.width = `${width}px`; canvas.style.height = `${height}px`;
   const context = canvas.getContext('2d');
   if (!context) { toast('暂时无法显示此图，请退出检查后重试。'); return; }
-  const scaleX = canvas.width / editing.image.naturalWidth, scaleY = canvas.height / editing.image.naturalHeight;
-  context.drawImage(editing.image, 0, 0, canvas.width, canvas.height); paintMasks(context, editing.masks, scaleX, true, scaleY);
+  const scaleX = canvas.width / editing.width, scaleY = canvas.height / editing.height;
+  context.drawImage(editorImage, 0, 0, canvas.width, canvas.height); paintMasks(context, editing.masks, scaleX, true, scaleY);
   if (drawing) { context.strokeStyle = '#ef913c'; context.lineWidth = 2; context.setLineDash([5,3]); context.strokeRect(drawing.x * scaleX, drawing.y * scaleY, (drawing.endX - drawing.x) * scaleX, (drawing.endY - drawing.y) * scaleY); }
   if (zoom === 'fit') viewport.scrollTo(0, 0);
   updateEditorScrollbar();
 }
-function editorPoint(event) { const rect = $('editorCanvas').getBoundingClientRect(); return { x: Math.min(editing.image.naturalWidth, Math.max(0,(event.clientX - rect.left) / rect.width * editing.image.naturalWidth)), y: Math.min(editing.image.naturalHeight, Math.max(0,(event.clientY - rect.top) / rect.height * editing.image.naturalHeight)) }; }
+function editorPoint(event) { const rect = $('editorCanvas').getBoundingClientRect(); return { x: Math.min(editing.width, Math.max(0,(event.clientX - rect.left) / rect.width * editing.width)), y: Math.min(editing.height, Math.max(0,(event.clientY - rect.top) / rect.height * editing.height)) }; }
 function resetEditorGesture() {
   const pointers = [...editorPointers.keys()];
   editorPointers.clear(); drawing = null; editorGesture = null; editorPanAnchor = null;
@@ -485,13 +618,16 @@ $('closeEditor').addEventListener('click', () => {
   $('editor').close();
 });
 $('editor').addEventListener('close', async () => {
-  const item = editing; resetEditorGesture(); scrollbarDrag = null; editing = null;
+  const item = editing, image = editorImage;
+  resetEditorGesture(); scrollbarDrag = null; editing = editorImage = null;
   document.body.classList.remove('editor-page-locked');
   document.body.style.removeProperty('--editor-page-top'); document.body.style.removeProperty('--editor-page-left');
   const restoreScroll = editorPageScroll; editorPageScroll = null;
   if (restoreScroll) window.scrollTo(restoreScroll.x, restoreScroll.y);
   if (!item) return;
-  await refreshThumbnail(item); renderPhotos();
+  try { await refreshThumbnail(item, image); }
+  finally { image.removeAttribute('src'); }
+  updatePhotoTile(item);
   if (renderedRevision !== state.revision && !state.busy && !editing) invalidateResults(0);
   await state.pendingRender;
   if (!editing) $('editorCanvas').width = $('editorCanvas').height = 1;

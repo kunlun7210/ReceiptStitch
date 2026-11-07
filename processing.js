@@ -198,66 +198,137 @@ export function paintWatermark(context, width, height, settings) {
   context.restore();
 }
 
+const MAX_PIXELS = 12_000_000;
+const MAX_EDGE = 8192;
+
 export function boundedImageSize(width, height) {
-  const ratio = Math.min(1, Math.sqrt(12_000_000 / (width * height)), 8192 / width, 8192 / height);
+  const ratio = Math.min(1, Math.sqrt(MAX_PIXELS / (width * height)), MAX_EDGE / width, MAX_EDGE / height);
   return { width: Math.max(1, Math.floor(width * ratio)), height: Math.max(1, Math.floor(height * ratio)), resized: ratio < 1 };
 }
 
-export function outputGeometry(left, right, direction = 'horizontal') {
-  if (!right) return boundedImageSize(left.naturalWidth, left.naturalHeight);
-  if (direction === 'vertical') {
-    const width = Math.max(left.naturalWidth, right.naturalWidth);
-    const firstHeight = Math.round(left.naturalHeight * width / left.naturalWidth);
-    const secondHeight = Math.round(right.naturalHeight * width / right.naturalWidth);
-    const size = boundedImageSize(width, firstHeight + secondHeight);
-    const height = Math.max(2, size.height);
-    const first = Math.max(1, Math.min(height - 1, Math.round(height * firstHeight / (firstHeight + secondHeight))));
-    return { ...size, height, firstHeight: first, secondHeight: height - first };
+const sum = sizes => sizes.reduce((total, size) => total + size, 0);
+
+function fitCanvas(width, height, columns, rows) {
+  if (columns > MAX_EDGE || rows > MAX_EDGE || columns * rows > MAX_PIXELS) {
+    throw new Error('这组拼图超过可导出的像素尺寸。请换用网格样式或把照片分成几组。');
   }
-  const height = Math.max(left.naturalHeight, right.naturalHeight);
-  const leftWidth = Math.round(left.naturalWidth * height / left.naturalHeight);
-  const rightWidth = Math.round(right.naturalWidth * height / right.naturalHeight);
-  const size = boundedImageSize(leftWidth + rightWidth, height);
-  const width = Math.max(2, size.width);
-  const first = Math.max(1, Math.min(width - 1, Math.round(width * leftWidth / (leftWidth + rightWidth))));
-  return { ...size, width, leftWidth: first, rightWidth: width - first };
+  const size = boundedImageSize(width, height);
+  const fittedWidth = Math.min(Math.max(columns, size.width), Math.floor(MAX_PIXELS / rows));
+  const fittedHeight = Math.min(Math.max(rows, size.height), Math.floor(MAX_PIXELS / fittedWidth));
+  return { width: fittedWidth, height: fittedHeight, resized: size.resized };
 }
 
-export async function composePair(left, right, settings, direction = 'horizontal') {
-  const vertical = direction === 'vertical';
-  const geometry = outputGeometry(left.image, right?.image, direction);
+// Split the integer canvas into adjoining tracks. Every photo keeps at least
+// one pixel on each axis, even when the whole collage has to be scaled down.
+function placeTracks(lengths, outputLength) {
+  const sourceLength = sum(lengths);
+  let sourceEdge = 0;
+  let outputEdge = 0;
+  return lengths.map((length, index) => {
+    sourceEdge += length;
+    const idealEdge = Math.round(outputLength * sourceEdge / sourceLength);
+    const remaining = lengths.length - index - 1;
+    const nextEdge = Math.max(outputEdge + 1, Math.min(idealEdge, outputLength - remaining));
+    const track = { offset: outputEdge, size: nextEdge - outputEdge };
+    outputEdge = nextEdge;
+    return track;
+  });
+}
+
+export function collageGeometry(photos, layout = 'horizontal') {
+  if (!photos.length) throw new Error('请选择要处理的图片。');
+  if (photos.length === 1) {
+    const size = boundedImageSize(photos[0].width, photos[0].height);
+    return { ...size, panels: [{ x: 0, y: 0, width: size.width, height: size.height }] };
+  }
+
+  const widest = photos.reduce((width, photo) => Math.max(width, photo.width), 0);
+  if (layout === 'grid-2' || layout === 'grid-3') {
+    const columns = Math.min(photos.length, layout === 'grid-2' ? 2 : 3);
+    const rowHeights = [];
+    photos.forEach((photo, index) => {
+      const row = Math.floor(index / columns);
+      const height = Math.round(photo.height * widest / photo.width);
+      rowHeights[row] = Math.max(rowHeights[row] || 1, height);
+    });
+    const size = fitCanvas(widest * columns, sum(rowHeights), columns, rowHeights.length);
+    const xs = placeTracks(Array(columns).fill(widest), size.width);
+    const ys = placeTracks(rowHeights, size.height);
+    const panels = photos.map((photo, index) => {
+      const column = xs[index % columns], row = ys[Math.floor(index / columns)];
+      const scale = Math.min(column.size / photo.width, row.size / photo.height);
+      const width = Math.max(1, Math.round(photo.width * scale));
+      const height = Math.max(1, Math.round(photo.height * scale));
+      return { x: column.offset + Math.floor((column.size - width) / 2),
+        y: row.offset + Math.floor((row.size - height) / 2), width, height };
+    });
+    return { ...size, panels };
+  }
+
+  if (layout === 'vertical') {
+    const heights = photos.map(photo => Math.max(1, Math.round(photo.height * widest / photo.width)));
+    const size = fitCanvas(widest, sum(heights), 1, photos.length);
+    const panels = placeTracks(heights, size.height).map(track => ({ x: 0, y: track.offset, width: size.width, height: track.size }));
+    return { ...size, panels };
+  }
+
+  const tallest = photos.reduce((height, photo) => Math.max(height, photo.height), 0);
+  const widths = photos.map(photo => Math.max(1, Math.round(photo.width * tallest / photo.height)));
+  const size = fitCanvas(sum(widths), tallest, photos.length, 1);
+  const panels = placeTracks(widths, size.width).map(track => ({ x: track.offset, y: 0, width: track.size, height: size.height }));
+  return { ...size, panels };
+}
+
+export async function decodePhoto(photo) {
+  const image = new Image();
+  try {
+    image.src = photo.url;
+    await image.decode();
+    if (image.naturalWidth && image.naturalHeight) return image;
+  } catch {}
+  image.removeAttribute('src');
+  throw new Error(`${photo.name} 无法读取。请在相册中转为 PNG 或 JPEG 后重试。`);
+}
+
+export async function composeCollage(photos, settings, layout, current = () => true) {
+  const { panels, ...size } = collageGeometry(photos, layout);
   const canvas = document.createElement('canvas');
-  canvas.width = geometry.width; canvas.height = geometry.height;
+  canvas.width = size.width; canvas.height = size.height;
   try {
     const context = canvas.getContext('2d', { alpha: false });
-    if (!context) throw new Error('图片暂时无法生成，请减少一次处理的照片数量后重试。');
+    if (!context) throw new Error('图片暂时无法生成，请把照片分成几组后重试。');
     context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
-    let offset = 0;
-    const images = !right ? [[left, geometry.width, geometry.height]] : vertical
-      ? [[left, geometry.width, geometry.firstHeight], [right, geometry.width, geometry.secondHeight]]
-      : [[left, geometry.leftWidth, geometry.height], [right, geometry.rightWidth, geometry.height]];
-    for (const [item, width, height] of images) {
-      context.save(); context.translate(vertical ? 0 : offset, vertical ? offset : 0);
-      context.beginPath(); context.rect(0, 0, width, height); context.clip();
-      context.drawImage(item.image, 0, 0, width, height);
-      paintMasks(context, item.masks, width / item.image.naturalWidth, false, height / item.image.naturalHeight);
-      context.restore(); offset += vertical ? height : width;
+    for (const [index, photo] of photos.entries()) {
+      if (!current()) return null;
+      const image = await decodePhoto(photo);
+      const { x, y, width, height } = panels[index];
+      context.save();
+      try {
+        if (!current()) return null;
+        context.translate(x, y);
+        context.beginPath(); context.rect(0, 0, width, height); context.clip();
+        context.drawImage(image, 0, 0, width, height);
+        paintMasks(context, photo.masks, width / photo.width, false, height / photo.height);
+      } finally {
+        context.restore();
+        image.removeAttribute('src');
+      }
     }
     paintWatermark(context, canvas.width, canvas.height, settings);
-    const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('生成图片失败，请减少一次选择的照片数量后重试。')), 'image/png'));
-    return { blob, ...geometry };
+    const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('生成图片失败，请把照片分成几组后重试。')), 'image/png'));
+    return { blob, ...size };
   } finally { canvas.width = canvas.height = 1; }
 }
 
-export async function makeThumbnail(item) {
+export async function makeThumbnail(item, image) {
   const canvas = document.createElement('canvas');
-  const scale = Math.min(1, 300 / item.image.naturalWidth, 300 / item.image.naturalHeight);
-  canvas.width = Math.max(1, Math.round(item.image.naturalWidth * scale)); canvas.height = Math.max(1, Math.round(item.image.naturalHeight * scale));
+  const scale = Math.min(1, 300 / item.width, 300 / item.height);
+  canvas.width = Math.max(1, Math.round(item.width * scale)); canvas.height = Math.max(1, Math.round(item.height * scale));
   try {
     const context = canvas.getContext('2d');
     if (!context) return null;
-    context.drawImage(item.image, 0, 0, canvas.width, canvas.height);
-    paintMasks(context, item.masks, canvas.width / item.image.naturalWidth, false, canvas.height / item.image.naturalHeight);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    paintMasks(context, item.masks, canvas.width / item.width, false, canvas.height / item.height);
     const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', .82));
     return blob ? URL.createObjectURL(blob) : null;
   } finally { canvas.width = canvas.height = 1; }
