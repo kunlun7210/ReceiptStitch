@@ -75,6 +75,7 @@ async function fixture(index, height = 144) {
   await page.locator('#watermarkText').fill('');
   await page.locator('#settings').evaluate(panel => panel.open = false);
   const fixtures = await Promise.all(Array.from({ length: 21 }, (_, index) => fixture(index)));
+  const white = [255, 255, 255];
   const imported = await add(fixtures.map(image => image.file));
   assert.deepEqual(imported.ready, Array(21).fill('ready'));
   assert.deepEqual(imported.groups, [fixtures.map(image => image.file.name)]);
@@ -83,10 +84,35 @@ async function fixture(index, height = 144) {
   await save(0, [96, 3024], fixtures.map((image, index) => [48, index * 144 + 72, image.color]));
   pass('21 张照片的横排和竖排各保存一张 PNG，逐张像素验证顺序');
 
+  for (const [name, columns, expectedCounts] of [
+    ['grid-2x3', 2, [6, 6, 6, 3]],
+    ['grid-3x3', 3, [9, 9, 3]],
+  ]) {
+    const { groups } = await layout(name);
+    assert.deepEqual(groups.map(group => group.length), expectedCounts);
+    assert.deepEqual(groups.flat(), fixtures.map(image => image.file.name));
+    assert.equal(await page.locator('#combineLabel').innerText(), '按版式拼接');
+    const position = (image, index) => [index % columns * 96 + 48, Math.floor(index / columns) * 144 + 72, image.color];
+    const size = [columns * 96, 432];
+    await save(0, size, fixtures.slice(0, columns * 3).map(position));
+    await save(groups.length - 1, size, [...fixtures.slice(-3).map(position), [size[0] - 48, 360, white]]);
+    assert.match(await page.locator('[data-result="1"] h3').innerText(), /第 1 组 · 2\//);
+  }
+  await selectGroupMode(page, 'custom');
+  const tailGroup = await group(19, 'new');
+  await group(20, tailGroup);
+  const paged = await settle();
+  assert.deepEqual(paged.groups.map(group => group.length), [9, 9, 1, 2]);
+  assert.deepEqual(paged.groups.flat(), fixtures.map(image => image.file.name));
+  await save(2, [96, 144], [[48, 72, fixtures[18].color]]);
+  await save(3, [288, 432], [[48, 72, fixtures[19].color], [144, 72, fixtures[20].color], [240, 72, white]]);
+  assert.match(await page.locator('[data-result="3"] h3').innerText(), /第 2 组/);
+  await selectGroupMode(page, 'all');
+  pass('两种固定样式按 6 张和 9 张分张导出，组别、顺序、空位和单张输出正确');
+
   await page.locator('#clearButton').click(); await settle();
   const photos = [fixtures[0], fixtures[1], await fixture(2, 72), fixtures[3], fixtures[4]];
   await add(photos.map(image => image.file));
-  const white = [255, 255, 255];
   await layout('grid-2');
   await save(0, [192, 432], [[48, 170, white], [48, 216, photos[2].color], [144, 216, photos[3].color], [48, 360, photos[4].color], [144, 360, white]]);
   await layout('grid-3');
@@ -119,7 +145,24 @@ async function fixture(index, height = 144) {
   assert.deepEqual((await settle()).groups, photos.map(image => [image.file.name]));
   await selectGroupMode(page, 'all'); assert.equal((await settle()).groups.length, 1);
   await selectGroupMode(page, 'custom'); assert.deepEqual((await settle()).groups, custom);
+  assert.deepEqual((await layout('grid-3x3')).groups, custom);
+  await save(0, [288, 432], [[128, 64, [237, 237, 237]], [240, 64, white], [48, 360, white]]);
   pass('不相邻照片可同组，单张与多张可同批导出，切换模式保留自定义分组');
+
+  const expectedPairs = [['test-1.png', 'test-2.png'], ['test-3.png', 'test-4.png'], ['test-5.png']];
+  assert.deepEqual((await layout('horizontal-pairs')).groups, expectedPairs);
+  assert.equal(await page.locator('#groupOptions').isVisible(), false);
+  assert.equal(await page.locator('[data-photo-group]').count(), 0);
+  await save(0, [192, 144], [[48, 72, photos[0].color], [144, 72, photos[1].color]]);
+  const verticalPairs = await layout('vertical-pairs');
+  assert.deepEqual(verticalPairs.groups, expectedPairs);
+  assert.deepEqual(verticalPairs.sizes, [[96, 288], [96, 216], [96, 144]]);
+  await save(0, [96, 288], [[48, 72, photos[0].color], [48, 216, photos[1].color]]);
+  await save(2, [96, 144], [[48, 72, photos[4].color]]);
+  assert.equal(await page.locator('[data-result="0"] [data-result-action="right"]').innerText(), '检查下图');
+  assert.deepEqual((await layout('grid-3x3')).groups, custom);
+  assert.equal(await page.locator('input[name="groupMode"][value="custom"]').isChecked(), true);
+  pass('两种手动配对按相邻照片横拼或竖拼，落单单独导出，退出后恢复自定义分组');
 
   const broken = { name: 'broken-test.png', mimeType: 'image/png', buffer: Buffer.from('not a PNG') };
   assert.deepEqual((await add([fixtures[5].file, broken, fixtures[6].file])).groups, custom);
@@ -130,13 +173,23 @@ async function fixture(index, height = 144) {
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   const sizes = await page.locator('.group-options label span, .photo-group select').evaluateAll(elements => elements.map(el => el.getBoundingClientRect().height));
   assert.ok(sizes.every(height => height >= 44), JSON.stringify(sizes));
+  await layout('vertical-pairs');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  const tiles = await page.locator('.stitch-option').evaluateAll(elements => elements.map(el => {
+    const card = el.getBoundingClientRect(), icon = el.querySelector('svg').getBoundingClientRect();
+    return [card.width, icon.width, icon.height, card.top];
+  }));
+  assert.equal(tiles.length, 8);
+  assert.ok(tiles.every(([width, iconWidth, iconHeight]) => Math.abs(width - tiles[0][0]) < 1 && iconWidth === tiles[0][1] && iconHeight === tiles[0][2]), JSON.stringify(tiles));
+  assert.equal(tiles[6][3], tiles[7][3]);
   await page.setViewportSize({ width: 393, height: 852 });
   await page.reload();
-  assert.equal(await page.locator('input[value="grid-3"]').isChecked(), true);
-  pass('追加、删除和坏图恢复保留原分组，窄屏无溢出，网格偏好可重开恢复');
+  assert.equal(await page.locator('input[value="grid-3x3"]').isChecked(), true);
+  pass('追加、删除和坏图恢复保留原分组，窄屏无溢出，重开恢复常规样式');
 
   if (preview) {
     await fs.mkdir(preview, { recursive: true });
+    await layout('grid-3');
     await page.locator('#stitchSettings').evaluate(panel => panel.open = true);
     await page.locator('#stitchSettings').screenshot({ path: path.join(preview, '拼图样式.png') });
     await page.locator('#settings').evaluate(panel => panel.open = true);
