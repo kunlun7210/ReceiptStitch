@@ -1,4 +1,4 @@
-import { DEFAULTS, COMMON_COLORS, PALETTE, detectSensitive, paintMasks, composeCollage, decodePhoto, makeThumbnail, boundedImageSize } from './processing.js';
+import { DEFAULTS, COMMON_COLORS, PALETTE, FIXED_GRIDS, detectSensitive, paintMasks, composeCollage, decodePhoto, makeThumbnail, boundedImageSize } from './processing.js';
 import { scanImage, prepareOCR, ocrCacheStatus, registerAppWorker } from './ocr.js';
 
 const $ = id => document.getElementById(id);
@@ -9,7 +9,13 @@ const editorPointers = new Map();
 let editorGesture = null, editorPanAnchor = null, scrollbarDrag = null, editorPageScroll = null;
 let modelPreparation = null, modelPhase = 'idle';
 const labels = { card: '卡尾号', balance: '可用余额 / 额度', manual: '手动遮挡' };
-const layoutNames = { horizontal: '横向拼接', vertical: '竖向拼接', 'grid-2': '双列网格', 'grid-3': '三列网格' };
+const pairDirections = new Map([['horizontal-pairs', 'horizontal'], ['vertical-pairs', 'vertical']]);
+const pairHint = layout => `相邻两张${pairDirections.get(layout) === 'vertical' ? '竖向' : '横向'}拼接，落单照片独立输出。`;
+const layoutNames = {
+  horizontal: '横向拼接', vertical: '竖向拼接', 'grid-2': '双列网格', 'grid-3': '三列网格',
+  'grid-2x3': '竖向 6 张', 'grid-3x3': '九宫格',
+  'horizontal-pairs': '两张一组 · 横向', 'vertical-pairs': '两张一组 · 竖向',
+};
 const colorChoices = [...COMMON_COLORS, ...PALETTE];
 const colorName = color => colorChoices.find(([value]) => value === color)?.[1] || '浅灰';
 
@@ -23,7 +29,7 @@ try {
 } catch {}
 try {
   const layout = localStorage.getItem('receipt-stitch-layout');
-  if (Object.hasOwn(layoutNames, layout)) state.stitchDirection = layout;
+  if (!pairDirections.has(layout) && Object.hasOwn(layoutNames, layout)) state.stitchDirection = layout;
 } catch {}
 try { const style = localStorage.getItem('receipt-stitch-mask-style'); if (['mosaic','solid','smear'].includes(style)) state.manualMaskStyle = style; } catch {}
 writeSettings();
@@ -93,14 +99,27 @@ $('fontSize').addEventListener('change', () => $('fontSize').value = state.setti
 $('resetSettings').addEventListener('click', () => { state.settings = { ...DEFAULTS }; writeSettings(); readSettings(); });
 
 function writeStitchSettings() {
-  document.querySelector(`input[name="stitchDirection"][value="${state.stitchDirection}"]`).checked = true;
-  $('stitchSummary').textContent = layoutNames[state.stitchDirection];
+  const layout = state.stitchDirection;
+  document.querySelector(`input[name="stitchDirection"][value="${layout}"]`).checked = true;
+  $('stitchSummary').textContent = layoutNames[layout];
+  const limit = layoutLimit(layout);
+  let hint = '每组应用当前样式，保留完整画面。单张直接打码加水印。';
+  if (pairDirections.has(layout)) hint = pairHint(layout);
+  else if (limit) hint = `每张成品最多 ${limit} 张，超出另出成品。空位留白，单张可独立输出。`;
+  $('stitchHint').textContent = hint;
+  writeGroupCopy();
 }
 $('stitchSettings').addEventListener('change', event => {
   if (event.target.name !== 'stitchDirection' || !Object.hasOwn(layoutNames, event.target.value)) return;
+  const wasPaired = pairDirections.has(state.stitchDirection);
   state.stitchDirection = event.target.value;
-  try { localStorage.setItem('receipt-stitch-layout', state.stitchDirection); } catch {}
-  writeStitchSettings(); invalidateResults(0);
+  const paired = pairDirections.has(state.stitchDirection);
+  if (!paired) {
+    try { localStorage.setItem('receipt-stitch-layout', state.stitchDirection); } catch {}
+  }
+  writeStitchSettings();
+  if (paired !== wasPaired) renderPhotos();
+  invalidateResults(0);
 });
 
 function chooseFiles() { $('fileInput').click(); }
@@ -241,6 +260,44 @@ function photoGroups() {
   return [...groups.entries()].sort(([a], [b]) => a - b).map(([, items]) => items);
 }
 
+function layoutLimit(layout) {
+  const grid = FIXED_GRIDS[layout];
+  return grid ? grid.columns * grid.rows : 0;
+}
+
+function resultPages(layout) {
+  const limit = layoutLimit(layout);
+  const groups = pairDirections.has(layout)
+    ? Array.from({ length: Math.ceil(state.items.length / 2) }, (_, index) => state.items.slice(index * 2, index * 2 + 2))
+    : photoGroups();
+  return groups.flatMap((photos, groupIndex) => {
+    if (!limit || photos.length <= limit) return [{ photos, groupIndex, page: 1, pageCount: 1 }];
+    const pageCount = Math.ceil(photos.length / limit);
+    return Array.from({ length: pageCount }, (_, index) => ({
+      photos: photos.slice(index * limit, (index + 1) * limit), groupIndex, page: index + 1, pageCount,
+    }));
+  });
+}
+
+function writeGroupCopy(groupCount = state.groupMode === 'custom' ? photoGroups().length : 0) {
+  if (pairDirections.has(state.stitchDirection)) {
+    $('groupHint').textContent = pairHint(state.stitchDirection);
+    $('groupHint').hidden = state.items.length < 2;
+    return;
+  }
+  const limit = layoutLimit(state.stitchDirection);
+  $('combineLabel').textContent = limit ? '按版式拼接' : '合成一张';
+  const hints = [];
+  if (groupCount && state.items.length > 1) {
+    hints.push(`共 ${groupCount} 组 · 在照片下方选择组别，同组照片一起拼接。`);
+  }
+  if (limit && state.groupMode !== 'single' && state.items.length > 1) {
+    hints.push(`每张成品最多 ${limit} 张，超出另出成品。`);
+  }
+  $('groupHint').hidden = hints.length === 0;
+  $('groupHint').textContent = hints.join(' ');
+}
+
 $('groupOptions').addEventListener('change', event => {
   if (state.busy || event.target.name !== 'groupMode') return;
   const mode = event.target.value;
@@ -283,15 +340,15 @@ function photoGroupPicker(item, number, groups) {
 
 function renderPhotos() {
   const count = state.items.length;
+  const paired = pairDirections.has(state.stitchDirection);
   $('workbench').hidden = !count && !state.busy; $('dropZone').hidden = count > 0 || state.busy; $('photoCount').textContent = count;
   $('clearButton').disabled = state.busy;
-  $('groupOptions').hidden = count < 2;
+  $('groupOptions').hidden = paired || count < 2;
   $('groupOptions').disabled = state.busy;
   $('groupOptions').querySelector(`input[value="${state.groupMode}"]`).checked = true;
-  const custom = state.groupMode === 'custom' && count > 1;
+  const custom = !paired && state.groupMode === 'custom' && count > 1;
   const groups = custom ? photoGroups() : [];
-  $('groupHint').hidden = !custom;
-  if (custom) $('groupHint').textContent = `共 ${groups.length} 组 · 在照片下方选择组别，同一组会拼成一张。`;
+  writeGroupCopy(groups.length);
   $('photoList').innerHTML = state.items.map((item, index) => `<article class="photo-item" id="photo-${item.id}" data-id="${item.id}">
     <button class="photo-figure" data-photo-action="edit" aria-label="检查第 ${index + 1} 张照片的遮挡">${photoTile(item, index + 1)}</button>
     <p class="photo-name">${escapeHTML(item.name)}</p>
@@ -354,20 +411,21 @@ function queueRender() {
 async function renderResults(revision) {
   const current = () => revision === state.revision && !state.busy && !editing;
   if (!current()) return;
-  const groups = photoGroups();
   const next = [];
   const settings = { ...state.settings };
   const layout = state.stitchDirection;
-  for (const [index, photos] of groups.entries()) {
+  const resultLayout = pairDirections.get(layout) ?? layout;
+  for (const [index, page] of resultPages(layout).entries()) {
     if (!current()) return next.forEach(freeResult);
-    const result = { photos, index, layout };
+    const { photos } = page;
+    const result = { ...page, index, layout: resultLayout };
     if (photos.some(photo => photo.status !== 'ready' && !(photo.status === 'error' && photo.reviewed))) {
       result.error = '识别未完成，请重试或逐张手动检查图片。';
       next.push(result);
       continue;
     }
     try {
-      const output = await composeCollage(photos, settings, layout, current);
+      const output = await composeCollage(photos, settings, resultLayout, current);
       if (!output || !current()) return next.forEach(freeResult);
       const name = `${String(index + 1).padStart(2,'0')}-${photos.length > 1 ? '收款拼图' : '隐私图片'}.png`;
       Object.assign(result, output, { file: new File([output.blob], name, { type: 'image/png' }), url: URL.createObjectURL(output.blob) });
@@ -385,9 +443,14 @@ async function renderResults(revision) {
 }
 
 function resultCard(result, numbers) {
-  const { photos, index, layout, url, error } = result;
+  const { photos, index, groupIndex, page, pageCount, layout, url, error } = result;
   const single = photos.length === 1, pair = photos.length === 2, vertical = layout === 'vertical';
   const number = index + 1;
+  const grouped = state.groupMode === 'custom' || (pairDirections.has(state.stitchDirection) && state.items.length > 1);
+  const title = single && !grouped && pageCount === 1
+    ? `第 ${number} 张`
+    : `第 ${groupIndex + 1} 组`;
+  const pageLabel = pageCount > 1 ? ` · ${page}/${pageCount}` : '';
   const caption = single ? `照片 ${numbers.get(photos[0].id)} · 单张处理` : `${photos.length} 张 · ${layoutNames[layout]}`;
   const masks = photos.flatMap(photo => photo.masks);
   const counts = { card: 0, balance: 0, manual: 0 };
@@ -406,7 +469,7 @@ function resultCard(result, numbers) {
        </select>`;
   return `<article class="result-card" data-result="${index}">
     <div class="result-heading">
-      <h3>第 ${number} ${single && state.groupMode !== 'custom' ? '张' : '组'} <span>${caption}</span></h3>
+      <h3>${title}${pageLabel} <span>${caption}</span></h3>
       ${pair ? `<button data-result-action="swap">${vertical ? '⇅ 交换上下' : '⇄ 交换左右'}</button>` : ''}
     </div>
     <button class="result-preview" data-result-action="preview" aria-label="放大查看第 ${number} 个处理结果" ${url ? '' : 'disabled'}>

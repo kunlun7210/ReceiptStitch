@@ -201,6 +201,11 @@ export function paintWatermark(context, width, height, settings) {
 const MAX_PIXELS = 12_000_000;
 const MAX_EDGE = 8192;
 
+export const FIXED_GRIDS = {
+  'grid-2x3': { columns: 2, rows: 3, portrait: true },
+  'grid-3x3': { columns: 3, rows: 3 },
+};
+
 export function boundedImageSize(width, height) {
   const ratio = Math.min(1, Math.sqrt(MAX_PIXELS / (width * height)), MAX_EDGE / width, MAX_EDGE / height);
   return { width: Math.max(1, Math.floor(width * ratio)), height: Math.max(1, Math.floor(height * ratio)), resized: ratio < 1 };
@@ -243,14 +248,22 @@ export function collageGeometry(photos, layout = 'horizontal') {
   }
 
   const widest = photos.reduce((width, photo) => Math.max(width, photo.width), 0);
-  if (layout === 'grid-2' || layout === 'grid-3') {
-    const columns = Math.min(photos.length, layout === 'grid-2' ? 2 : 3);
-    const rowHeights = [];
-    photos.forEach((photo, index) => {
-      const row = Math.floor(index / columns);
-      const height = Math.round(photo.height * widest / photo.width);
-      rowHeights[row] = Math.max(rowHeights[row] || 1, height);
-    });
+  const fixed = Object.hasOwn(FIXED_GRIDS, layout) ? FIXED_GRIDS[layout] : null;
+  if (fixed || layout === 'grid-2' || layout === 'grid-3') {
+    const columns = fixed?.columns ?? Math.min(photos.length, layout === 'grid-2' ? 2 : 3);
+    let rowHeights;
+    if (fixed) {
+      if (photos.length > columns * fixed.rows) throw new Error('照片超过此版式的容量。');
+      const cellHeight = photos.reduce((height, photo) => Math.max(height, photo.height), fixed.portrait ? widest : 1);
+      rowHeights = Array(fixed.rows).fill(cellHeight);
+    } else {
+      rowHeights = [];
+      photos.forEach((photo, index) => {
+        const row = Math.floor(index / columns);
+        const height = Math.round(photo.height * widest / photo.width);
+        rowHeights[row] = Math.max(rowHeights[row] || 1, height);
+      });
+    }
     const size = fitCanvas(widest * columns, sum(rowHeights), columns, rowHeights.length);
     const xs = placeTracks(Array(columns).fill(widest), size.width);
     const ys = placeTracks(rowHeights, size.height);

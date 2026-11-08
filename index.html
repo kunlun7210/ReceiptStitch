@@ -38,7 +38,7 @@
       <div class="section-title"><div><h2 id="photosTitle">已选照片 <span id="photoCount">0</span></h2><p>点照片检查遮挡</p></div><button class="text-button" id="clearButton">清空</button></div>
       <fieldset class="group-options" id="groupOptions" aria-describedby="groupHint" hidden>
         <legend class="visually-hidden">处理分组</legend>
-        <label><input class="visually-hidden" type="radio" name="groupMode" value="all" checked><span>合成一张</span></label>
+        <label><input class="visually-hidden" type="radio" name="groupMode" value="all" checked><span id="combineLabel">合成一张</span></label>
         <label><input class="visually-hidden" type="radio" name="groupMode" value="single"><span>逐张处理</span></label>
         <label><input class="visually-hidden" type="radio" name="groupMode" value="custom"><span>自定义分组</span></label>
       </fieldset>
@@ -68,8 +68,34 @@
           <label class="stitch-option"><input type="radio" name="stitchDirection" value="vertical"><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="5" y="1" width="22" height="10" rx="2"/><rect x="5" y="15" width="22" height="10" rx="2"/></svg><strong>竖向拼接</strong><small>统一宽度，排成一列</small></span></label>
           <label class="stitch-option"><input type="radio" name="stitchDirection" value="grid-2"><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="4" y="2" width="10" height="9" rx="1.5"/><rect x="18" y="2" width="10" height="9" rx="1.5"/><rect x="4" y="15" width="10" height="9" rx="1.5"/><rect x="18" y="15" width="10" height="9" rx="1.5"/></svg><strong>双列网格</strong><small>每行最多 2 张</small></span></label>
           <label class="stitch-option"><input type="radio" name="stitchDirection" value="grid-3"><span><svg viewBox="0 0 32 26" aria-hidden="true"><rect x="2" y="2" width="7" height="9" rx="1.5"/><rect x="12.5" y="2" width="7" height="9" rx="1.5"/><rect x="23" y="2" width="7" height="9" rx="1.5"/><rect x="2" y="15" width="7" height="9" rx="1.5"/><rect x="12.5" y="15" width="7" height="9" rx="1.5"/><rect x="23" y="15" width="7" height="9" rx="1.5"/></svg><strong>三列网格</strong><small>每行最多 3 张</small></span></label>
+          <label class="stitch-option">
+            <input type="radio" name="stitchDirection" value="grid-2x3">
+            <span><svg viewBox="0 0 32 26" aria-hidden="true">
+              <path d="M6 2h8v5H6z M18 2h8v5h-8z M6 10h8v5H6z M18 10h8v5h-8z M6 18h8v5H6z M18 18h8v5h-8z"/>
+            </svg><strong>竖向 6 张</strong><small>2 列 × 3 行</small></span>
+          </label>
+          <label class="stitch-option">
+            <input type="radio" name="stitchDirection" value="grid-3x3">
+            <span><svg viewBox="0 0 32 26" aria-hidden="true">
+              <path d="M3 2h6v5H3z M13 2h6v5h-6z M23 2h6v5h-6z M3 10h6v5H3z M13 10h6v5h-6z M23 10h6v5h-6z M3 18h6v5H3z M13 18h6v5h-6z M23 18h6v5h-6z"/>
+            </svg><strong>九宫格</strong><small>3 列 × 3 行</small></span>
+          </label>
+          <label class="stitch-option">
+            <input type="radio" name="stitchDirection" value="horizontal-pairs">
+            <span><svg viewBox="0 0 32 26" aria-hidden="true">
+              <rect x="4" y="4" width="11" height="6" rx="1.5"/><rect x="17" y="4" width="11" height="6" rx="1.5"/>
+              <rect x="4" y="16" width="11" height="6" rx="1.5"/><rect x="17" y="16" width="11" height="6" rx="1.5"/>
+            </svg><strong>两张一组 · 横向</strong><small>相邻两张横拼</small></span>
+          </label>
+          <label class="stitch-option">
+            <input type="radio" name="stitchDirection" value="vertical-pairs">
+            <span><svg viewBox="0 0 32 26" aria-hidden="true">
+              <rect x="5" y="3" width="7" height="9" rx="1.5"/><rect x="5" y="14" width="7" height="9" rx="1.5"/>
+              <rect x="20" y="3" width="7" height="9" rx="1.5"/><rect x="20" y="14" width="7" height="9" rx="1.5"/>
+            </svg><strong>两张一组 · 竖向</strong><small>相邻两张竖拼</small></span>
+          </label>
         </fieldset>
-        <p class="stitch-hint full">每组应用当前样式，保留完整画面。单张直接打码加水印。</p>
+        <p class="stitch-hint full" id="stitchHint">每组应用当前样式，保留完整画面。单张直接打码加水印。</p>
       </div>
     </details>
 
@@ -91,7 +117,7 @@
       </div>
     </details>
 
-    <footer><span class="version">v1.2 · 2026.11.07</span></footer>
+    <footer><span class="version">v1.2 · 2026.11.08</span></footer>
   </main>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
