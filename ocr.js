@@ -107,7 +107,7 @@ async function download(url, onBytes, { signal, mirror = false } = {}) {
 function sourceBases(manifest, base) {
   const preference = new URLSearchParams(location.search).get('source');
   if (preference === 'origin' || !/^[a-f0-9]{40}$/.test(manifest.cdnRevision || '')) return [base.href];
-  return [...CDN_HOSTS.map(host => `https://${host}/gh/kunlun7210/ReceiptStitch@${manifest.cdnRevision}/dist/`), base.href];
+  return [...CDN_HOSTS.map(host => `https://${host}/gh/kunlun7210/zhetu@${manifest.cdnRevision}/dist/`), base.href];
 }
 
 async function compressedAsset(file, source, onBytes, options) {
